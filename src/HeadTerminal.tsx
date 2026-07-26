@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { createScrollIntent } from './scrollIntent';
+import type { ScrollIntent } from './scrollIntent';
 import { Terminal } from 'xterm';
 import 'xterm/css/xterm.css';
 import { C } from './render/tokens';
@@ -321,6 +323,21 @@ export default function HeadTerminal({
     postBytes(`\x1b[<${btn};${col};${row}M`.repeat(ticks));   // scroll is modifier-neutral
   };
 
+  // ---- ONE line-intent accumulator, every local scroll format ------------------------------------
+  // Task 055ef0. Finger drag, hardware wheel and BT-trackpad momentum all converge on the SAME
+  // converter (src/scrollIntent.ts), get quantized to whole line ticks, and leave as ONE batched
+  // POST per frame. The contract — batching, no lost intent, no in-batch reversal, deltaMode
+  // handling — is unit-tested there rather than asserted here.
+  const intentRef = useRef<ScrollIntent | null>(null);
+  if (!intentRef.current) {
+    intentRef.current = createScrollIntent({
+      linePx: 15,                                     // ≈ one line-height: the drag's proven 1:1 feel
+      pageHeightPx: () => hostRef.current?.clientHeight ?? 400,
+      emit: (dir, ticks) => sendWheel(dir, ticks),    // ONE post, |ticks| sequences
+    });
+  }
+  const intent = intentRef.current;
+
   // ---- xterm: raw-byte render keyed on the live sid ----------------------------------------------
   useEffect(() => {
     if (!sess || !hostRef.current) return;
@@ -476,23 +493,39 @@ export default function HeadTerminal({
     const onTS = (e: TouchEvent) => { if (e.touches.length === 1) { lastY = e.touches[0].clientY; accum = 0; } };
     const onTM = (e: TouchEvent) => {
       if (lastY == null || e.touches.length !== 1) return;
-      const y = e.touches[0].clientY; accum += y - lastY; lastY = y;
-      const STEP = 15;                        // ≈ one line-height of drag per wheel tick → ~1:1 feel
-      const n = Math.trunc(accum / STEP);     // ticks this move is worth (finger down → up = earlier)
-      if (n !== 0) {
-        // ONE batched POST of |n| wheel sequences. Proven on a real head to scroll N lines; rapid
-        // SEPARATE single-tick POSTs collapsed to ~1 effective scroll, which is why a drag moved 1 line.
-        sendWheel(n > 0 ? 'up' : 'down', Math.abs(n));
-        accum -= n * STEP;
+      const y = e.touches[0].clientY; const dy = y - lastY; lastY = y;
+      // the drag's own batching is now the shared accumulator's — same quantization, same one-POST
+      // -per-frame flush the wheel path uses. Behaviour is unchanged; there is just one of it.
+      accum += dy;
+      intent.pushPx(dy);
+      if (Math.abs(accum) >= 15) {
+        accum %= 15;
         e.preventDefault(); e.stopPropagation();   // claim from page scroll + xterm's touch/mouse handling
       }
     };
     const onTE = () => { lastY = null; };
+    // Hardware wheel / BT-trackpad. CAPTURE PHASE IS LOAD-BEARING, not stylistic: xterm's own mouse
+    // reporting is today's ONLY sender of wheel SGR (it converts the event and emits it through
+    // onData → sendBytes → postBytes, one POST per event). A handler bound in the bubble phase would
+    // run AFTER xterm had already sent, and the head would receive both streams — double the scroll.
+    // Claiming in capture and stopping propagation makes this the single sender.
+    //
+    // VERTICAL ONLY. Horizontal-dominant events are deliberately left to propagate: ConsoleDeck's
+    // axis-lock owns them for pane-switching, and swallowing them here would kill that gesture over
+    // any terminal pane.
+    const onWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;   // the deck's gesture, not ours
+      intent.pushWheel(e);
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
     if (interactive && host) {
       // capture phase so we beat xterm's own touch handlers to the vertical-drag gesture
       host.addEventListener('touchstart', onTS, { passive: false, capture: true });
       host.addEventListener('touchmove', onTM, { passive: false, capture: true });
       host.addEventListener('touchend', onTE, { capture: true });
+      host.addEventListener('wheel', onWheel, { passive: false, capture: true });
     }
 
     // SSE stream with a VISIBLE reconnect state (audit 2026-07-02: a mid-session transport drop
@@ -542,6 +575,8 @@ export default function HeadTerminal({
         host.removeEventListener('touchstart', onTS, { capture: true });
         host.removeEventListener('touchmove', onTM, { capture: true });
         host.removeEventListener('touchend', onTE, { capture: true });
+        host.removeEventListener('wheel', onWheel, { capture: true });
+        intent.dispose();   // a pending frame must not emit into a torn-down session
       }
       teardownXterm();
     };

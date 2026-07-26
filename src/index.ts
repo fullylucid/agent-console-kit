@@ -11,6 +11,7 @@ export { default as RichMarkdown, CodeBlock, DiffBlock, looksLikeDiff, InlineTex
 export { default as PreviewDock } from './render/PreviewDock';
 export { tokenize, type TokClass } from './render/highlight';
 export { safeUrl } from './render/sanitizeUrl';
+export { createScrollIntent, type ScrollIntent, type ScrollIntentOpts } from './scrollIntent';
 export { C } from './render/tokens';
 export { visiblePoll } from './usePoll';
 export { useMediaQuery, useIsMobile, MOBILE_QUERY } from './useMediaQuery';
