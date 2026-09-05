@@ -1,0 +1,71 @@
+<!doctype html><meta charset=utf-8>
+<!-- fit-probe: drive the REAL createFitter (bundled from ../src/fitFont.ts by run.sh) against REAL xterm 5.3
+     in headless Chrome, across pane widths × heights, DOM or Canvas renderer (#canvas), any device scale
+     factor. Reports per case: font chosen, painted width, gap, overflow?, would one step up still fit?,
+     rows the relay would be asked for, mirror height vs pane height, passes, done. -->
+<link rel=stylesheet href="../node_modules/xterm/css/xterm.css">
+<script>
+// headless virtual time stops delivering rAF after ~128 frames — route rAF through timers for xterm AND the fitter
+window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 16); window.cancelAnimationFrame = clearTimeout;
+</script>
+<script src="../node_modules/xterm/lib/xterm.js"></script>
+<script src="dist/xterm-addon-canvas.js"></script>
+<script src="dist/fitFont.js"></script>
+<body style="margin:0;background:#000"><pre id=out></pre><div id=hosts></div>
+<script>
+const OUT = document.getElementById('out');
+window.onerror = (m, src, l, c, e) => { OUT.textContent += '\nERR ' + m + ' @' + l + ':' + c; };
+const useCanvas = location.hash.includes('canvas');
+const CPF_ROWS = 6;   // rows in the probe terminal — the cell-height/font ratio is measured from it
+const cases = [];
+for (const [w, h] of [[360, 700], [380, 700], [850, 900], [1130, 900], [1700, 900], [1920, 1000], [2540, 900], [3400, 900], [3400, 1400]]) cases.push({ w, h, cols: 100 });
+cases.push({ w: 1700, h: 900, cols: 120 });
+const results = []; let pending = cases.length;
+for (const { w, h, cols } of cases) {
+  const host = document.createElement('div');
+  host.style.cssText = `width:${w}px;padding:6px;box-sizing:content-box;background:#04070a;overflow:hidden;position:relative;margin-bottom:4px`;
+  document.getElementById('hosts').appendChild(host);
+  const term = new Terminal({ cols, rows: CPF_ROWS, fontSize: 12, fontFamily: "'SFMono-Regular',ui-monospace,Consolas,monospace", scrollback: 0 });
+  term.open(host);
+  if (useCanvas) { try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (e) { OUT.textContent += '\nCANVAS-ERR ' + e; } }
+  term.write('W'.repeat(cols) + '\r\n' + 'the quick brown fox 0123456789 '.repeat(3));
+  const applyFs = (fs) => { if (term.options.fontSize === fs) return; term.options.fontSize = fs; try { term.refresh(0, term.rows - 1); } catch {} };
+  const cellPerFs = () => { const el = term.element; const fs = term.options.fontSize; return el && el.offsetHeight > 0 ? (el.offsetHeight / term.rows) / fs : 0; };
+  const fitter = FF.createFitter({
+    availW: () => host.clientWidth - 12, cols: () => term.cols, apply: applyFs,
+    painted: () => { const el = host.querySelector('.xterm-screen'); return el ? el.getBoundingClientRect().width : 0; },
+    raf: (cb) => requestAnimationFrame(cb),
+    maxFs: () => FF.heightBoundFont(h, cellPerFs(), FF.MIN_RELAY_ROWS),
+  });
+  let frames = 0;
+  const tick = () => {
+    fitter.fit();
+    if (++frames < 16) return requestAnimationFrame(tick);
+    const st = fitter.state();
+    const availW = host.clientWidth - 12;
+    const screen = () => host.querySelector('.xterm-screen').getBoundingClientRect().width;
+    const fsNow = term.options.fontSize;
+    const painted = screen();
+    const cap = Math.floor(FF.heightBoundFont(h, cellPerFs(), FF.MIN_RELAY_ROWS));
+    const cpfNow = cellPerFs();
+    const rows = FF.relayRows(h, cpfNow, fsNow);
+    const mirrorH = rows * cpfNow * fsNow;
+    const finish = (widerFits) => {
+      results.push({ w, h, cols, dpr: devicePixelRatio, renderer: useCanvas ? 'canvas' : 'dom', fs: fsNow, painted: +painted.toFixed(1), gap: +(availW - painted).toFixed(1), overflowX: painted > availW, widerFits, rows, mirrorH: +mirrorH.toFixed(0), overflowY: mirrorH > h, heightBound: fsNow >= cap, passes: st.passes, done: !!st.done, ratio: st.ratio && +st.ratio.toFixed(4) });
+      if (--pending === 0) OUT.textContent = 'RESULTS ' + JSON.stringify(results) + ' LAG ' + JSON.stringify(results.lag || []);
+    };
+    // oracle: would one step up (still under the height cap) fit the width? Measured the way the fitter
+    // measures — after a frame — then restored.
+    if (fsNow + FF.FS_STEP > cap) return finish(false);
+    term.options.fontSize = fsNow + FF.FS_STEP; term.refresh(0, term.rows - 1);
+    const pwSync = screen();                                        // is the screen box updated synchronously?
+    requestAnimationFrame(() => {
+      const pw = screen();
+      term.options.fontSize = fsNow; term.refresh(0, term.rows - 1);
+      requestAnimationFrame(() => { results.lag = results.lag || []; if (pwSync !== pw) results.lag.push({ w, fs: fsNow + FF.FS_STEP, pwSync, pw }); finish(pw <= availW && pw > painted); });
+    });
+  };
+  requestAnimationFrame(tick);
+}
+setTimeout(() => { if (!OUT.textContent) OUT.textContent = 'TIMEOUT pending=' + pending; }, 25000);
+</script>

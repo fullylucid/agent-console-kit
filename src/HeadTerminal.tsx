@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import 'xterm/css/xterm.css';
 import { C } from './render/tokens';
-import { CHAR_RATIO_DEFAULT, createFitter, rowProjectionFont } from './fitFont';
+import { CHAR_RATIO_DEFAULT, MIN_RELAY_ROWS, createFitter, heightBoundFont, relayRows } from './fitFont';
 
 // HeadTerminal — the reusable raw-TUI engine (extracted from TerminalPanel so the console head-view
 // and the terminal drawer share ONE implementation, no copy-paste). It owns the whole lifecycle for a
@@ -364,23 +364,58 @@ export default function HeadTerminal({
     // ZOOM TO FIT (2026-09-04, Schyler: dead space right of every desktop TUI pane): the font is no longer
     // a guessed ratio under a 16px ceiling. Project → apply → read back the width xterm painted
     // (`.xterm-screen`, = cols × its device-pixel-rounded cell) → correct, until the largest font that does
-    // not overflow is found (createFitter in ./fitFont — the same loop the unit tests and the headless
-    // probe drive). Keyed on (availW × cols): a pane resize restarts from the last MEASURED ratio; the
+    // not overflow is found (createFitter in ./fitFont — the same loop the unit tests and probe/ drive).
+    // The zoom is bounded on BOTH axes: width (the fit) and height (`maxFs` = the font at which
+    // MIN_RELAY_ROWS rows still fit the keyboard-closed pane). The relay's row count then follows the font
+    // ACTUALLY applied (relayRows), so mirror and head agree and the whole TUI is always on screen — no
+    // clipped top, no unreachable rows. On a pane so wide that fit-to-width would leave < MIN_RELAY_ROWS,
+    // the height bound wins and a right-hand gap remains: the pane's aspect is the limit. (PR #7 rounds 1–2.)
+    // Keyed on (width bucket × cols × height cap): a pane resize restarts from the last MEASURED ratio; the
     // ResizeObserver re-entry caused by the font's own height change hits the converged key → no-op.
+    let scheduleRows: () => void = () => {};           // → resizeMirrorSoon once defined (a font change re-derives rows)
     const applyFs = (fs: number) => {
       if (term.options.fontSize === fs) return;
       term.options.fontSize = fs;                      // xterm re-measures cells on the next render
       try { term.refresh(0, term.rows - 1); } catch { /* */ }
+      if (mirror) scheduleRows();
     };
     // `sized` flips when the relay's first size event lands (real pane cols). Until then xterm reports its
-    // default 80 and a fit would converge for the wrong width, then visibly re-fit — so the fitter waits.
+    // default 80 and a fit would converge for the wrong width, then visibly re-fit — so the fitter waits, but
+    // only briefly: if no size event arrives (relay slow / dead) it fits with whatever cols xterm has rather
+    // than sitting at the 12px default with half the TUI clipped (review finding).
     let sized = false;
+    let colsFallback = false;
+    const colsFallbackTimer = window.setTimeout(() => { colsFallback = true; relayout(); }, 1500);
+    // Renderer cell-height per font px, measured at the font CURRENTLY applied. Not memoized: xterm rounds
+    // the line height to whole px, so the ratio is ~1.33 at 12px and ~1.2 at 28px — a value cached at the
+    // 12px default would under-count rows by ~10% at a desktop zoom. The height cap derived from it is
+    // non-decreasing in the font (bigger font → truer ratio → looser cap), so re-measuring cannot oscillate.
+    const cellPerFs = () => {
+      const el = term.element; const fs = (term.options.fontSize as number) || 0;
+      return el && term.rows > 0 && fs > 0 && el.offsetHeight > 0 ? (el.offsetHeight / term.rows) / fs : 0;
+    };
+    // Pixels available for terminal CONTENT in the KEYBOARD-CLOSED layout (spec: never shrink on keyboard —
+    // slide() tucks the top under the header instead). While the keyboard is open the last value holds.
+    let availHMemo = 0;
+    const availH = () => {
+      const root = rootRef.current, block = blockRef.current, host = hostRef.current;
+      if (!root || !block || !host) return availHMemo;
+      const vv = window.visualViewport;
+      if (vv && window.innerHeight - vv.height > 100) return availHMemo;
+      const chrome = block.offsetHeight - host.offsetHeight;   // controls + key-bar + composer (non-terminal)
+      const h = root.clientHeight - chrome - 12;       // host has 6px top+bottom pad
+      if (h > 0) availHMemo = h;
+      return availHMemo;
+    };
     const fitter = createFitter({
       availW: () => (hostRef.current ? hostRef.current.clientWidth - 12 : 0),   // host has 6px padding on each side
-      cols: () => (sized ? term.cols : 0),
+      cols: () => (sized || colsFallback ? term.cols : 0),
       apply: applyFs,
       painted: () => { const el = hostRef.current?.querySelector('.xterm-screen'); return el ? el.getBoundingClientRect().width : 0; },
       raf: (cb) => { requestAnimationFrame(cb); },
+      // height bound: interactive mirrors get their rows from the relay (≥ MIN_RELAY_ROWS must fit);
+      // a read-only mirror keeps the head's rows, so ALL of them must fit.
+      maxFs: () => heightBoundFont(availH(), cellPerFs(), interactive ? MIN_RELAY_ROWS : term.rows),
     });
     const fitFont = () => {
       if (!mirror) { applyFs(SHELL_FS); return; }      // shell: fixed readable font; cols are driven to fit, not font
@@ -422,34 +457,22 @@ export default function HeadTerminal({
       const overflow = Math.max(0, block.offsetHeight - root.clientHeight);
       block.style.transform = overflow > 0 ? `translateY(${-overflow}px)` : 'none';
     };
-    // FILL the host (rows) + drive the pane to TARGET_MIRROR_COLS (bigger fit-to-width font). The head's
-    // alt-screen TUI draws exactly pane-many rows, so we ask the relay to make the mirrored window
-    // TARGET_MIRROR_COLS wide and tall enough to fill — still NO horizontal scroll (cols are sized to the
-    // width). desiredRows = how many rows fit the terminal's share of the KEYBOARD-CLOSED layout, at the
-    // font fit-to-width WOULD pick for TARGET cols. NOT recomputed while the keyboard is open (spec: never
-    // shrink rows — #72's slide tucks the top under the header instead). Converges in 1 POST (+ at most one
-    // ±1-2 row rounding correction); cols are pinned to TARGET and never oscillate.
+    // FILL the host (rows) + drive the pane to TARGET_MIRROR_COLS. The head's alt-screen TUI draws exactly
+    // pane-many rows, so we ask the relay to make the mirrored window TARGET_MIRROR_COLS wide and as tall as
+    // fits the keyboard-closed pane AT THE FONT ACTUALLY APPLIED (relayRows; floored at MIN_RELAY_ROWS, which
+    // the height-bounded zoom guarantees fit). Mirror and head agree → nothing clipped, nothing unreachable.
+    // NOT recomputed while the keyboard is open (availH holds its last value). Converges in 1 POST (+ at most
+    // one ±1-2 row rounding correction); cols are pinned to TARGET and never oscillate.
     const resizeMirror = () => {
       if (kind !== 'pane' || !interactive || !sized) return;   // wait for real pane cols (not xterm's 80)
       const sid = sidRef.current;
-      const root = rootRef.current, block = blockRef.current, host = hostRef.current, el = term.element;
-      if (!sid || !root || !block || !host || !el || !term.rows) return;
+      if (!sid || !term.element || !term.rows) return;
       const vv = window.visualViewport;                // keyboard open → don't recompute (would shrink rows)
       if (vv && window.innerHeight - vv.height > 100) return;
-      const curFs = (term.options.fontSize as number) || 1;
-      const cellPerFs = (el.offsetHeight / term.rows) / curFs;   // renderer cell-height per font-px (stable across sizes)
-      // Drive the pane to TARGET_MIRROR_COLS. Project the cell height for the ROW-PROJECTION font at that col
-      // count (the fit-to-width font capped at ROW_PROJECTION_FS_MAX — the pre-zoom value) and derive rows
-      // from THAT, so the single POST is {cols:TARGET, rows: rowsThatFitUnzoomed}. The mirror's ZOOM never
-      // drives this number: rows are the head's REAL PTY, and a zoomed 3400px pane would otherwise reflow
-      // the head to 100×10 (PR #7 finding 3). When the zoomed mirror is taller than the pane, slide() shows
-      // its bottom (prompt + latest output) and tucks the top under the header — the keyboard-open behavior.
-      const availW = host.clientWidth - 12;
-      const projCellPx = cellPerFs * rowProjectionFont(availW, TARGET_MIRROR_COLS, fitter.state().ratio);   // measured ratio once known
-      const chrome = block.offsetHeight - host.offsetHeight;   // controls + key-bar + composer (non-terminal)
-      const avail = root.clientHeight - chrome - 12;   // px for terminal CONTENT (host has 6px top+bottom pad)
-      if (!(projCellPx > 0) || avail <= 0) return;     // mid-layout / not painted → skip this measurement
-      const want = Math.max(10, Math.min(160, Math.floor(avail / projCellPx)));
+      const cpf = cellPerFs(); const avail = availH();
+      const appliedFs = (term.options.fontSize as number) || 0;
+      if (!(cpf > 0) || avail <= 0 || appliedFs <= 0) return;   // mid-layout / not painted → skip this measurement
+      const want = relayRows(avail, cpf, appliedFs);
       const atTarget = term.cols === TARGET_MIRROR_COLS;
       if (atTarget && (want === term.rows || want === lastRowsRef.current)) return;   // converged / already asked
       lastRowsRef.current = want;
@@ -463,6 +486,7 @@ export default function HeadTerminal({
     // unstable row-counts. Coalescing to the settled value makes it converge in one resize.
     let rzTimer: ReturnType<typeof setTimeout> | undefined;
     const resizeMirrorSoon = () => { clearTimeout(rzTimer); rzTimer = setTimeout(resizeMirror, 300); };
+    scheduleRows = resizeMirrorSoon;                   // the fitter's font changes re-derive the relay rows
     let slideQ = false;                                // rAF-coalesce so a busy stream re-slides once/frame
     const slideSoon = () => { if (slideQ) return; slideQ = true; requestAnimationFrame(() => { slideQ = false; slide(); }); };
     const relayout = () => { fitFont(); slide(); };    // width-refit + slide; rows are recomputed separately
@@ -545,6 +569,7 @@ export default function HeadTerminal({
     return () => {
       window.removeEventListener('resize', onWinResize);
       clearTimeout(rzTimer);
+      clearTimeout(colsFallbackTimer);
       clearTimeout(retryTimer);
       ro.disconnect();
       if (interactive && host) {

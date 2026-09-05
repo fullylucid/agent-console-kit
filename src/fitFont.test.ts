@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FS_STEP, MIRROR_FS_MAX, MIRROR_FS_MIN, ROW_PROJECTION_FS_MAX, createFitter, fitFontSize, nextFit, rowProjectionFont, type FitState } from './fitFont';
+import { BLANK_FRAMES_MAX, CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FIT_W_BUCKET, FS_STEP, MAX_RELAY_ROWS, MIN_RELAY_ROWS, MIRROR_FS_MAX, MIRROR_FS_MIN, bucketWidth, createFitter, fitFontSize, heightBoundFont, nextFit, relayRows, type FitState } from './fitFont';
 
 // A model of xterm's cell rounding: char advance = fs × ratio in CSS px, the cell is floored to whole
 // DEVICE pixels, and the screen is cols × cell. Monotonic in fs. (xterm 5.3 DomRenderer: cell.width =
@@ -24,6 +24,8 @@ const converge = (availW: number, cols: number, ratio: number, dpr: number) => {
   expect(q.length).toBe(0);
   return { fs, rendered: paint(fs, cols), passes: fitter.state().passes, converged: fitter.state().done === true };
 };
+// the fitter fits the width BUCKET (floor to FIT_W_BUCKET) — the oracle for the loop is the bucketed one
+const bucketOracle = (availW: number, cols: number, ratio: number, dpr: number) => oracle(bucketWidth(availW), cols, ratio, dpr);
 
 // The largest font whose rendered width fits — the answer the loop must find.
 const oracle = (availW: number, cols: number, ratio: number, dpr: number) => {
@@ -124,7 +126,7 @@ describe('createFitter — the apply→measure→correct loop', () => {
     for (const w of widths) for (const c of cols) for (const r of ratios) for (const d of dprs) {
       const paint = renderer(r, d);
       const got = converge(w, c, r, d);
-      const want = oracle(w, c, r, d);
+      const want = bucketOracle(w, c, r, d);
       expect(got.rendered, `overflow at w=${w} c=${c} r=${r} dpr=${d}`).toBeLessThanOrEqual(w);
       // "largest" is judged by the WIDTH it paints: under device-pixel rounding two adjacent font sizes can
       // share one cell width (fs 8 and 9 both → 4px cells at dpr 1); either fills the pane identically.
@@ -136,9 +138,9 @@ describe('createFitter — the apply→measure→correct loop', () => {
     }
     expect(checked).toBe(widths.length * cols.length * ratios.length * dprs.length);
   });
-  it('fills a desktop pane: the residual right-hand gap is under one font step', () => {
-    const { fs, rendered } = converge(1700, 100, 0.6, 1);
-    expect(fs).toBe(29.75);                    // 29.75 × .6 → 17px cells → 1700 exactly; 30 → 18px → 1800 overflows
+  it('fills a desktop pane: the residual right-hand gap is under one font step (+ the 8px width bucket)', () => {
+    const { fs, rendered } = converge(1704, 100, 0.6, 1);   // bucket 1704 → fits 1704 exactly
+    expect(fs).toBe(29.75);                    // 29.75 × .6 → 17px cells → 1700; 30 → 18px → 1800 overflows
     expect(rendered).toBe(1700);
     expect(fs).toBeGreaterThan(16);            // the old ceiling would have painted 100 × 9 = 900px into 1700
     // fractional cells (the DOM renderer measured 0.6 × fs, unrounded): the gap is bounded by one step's worth
@@ -146,7 +148,7 @@ describe('createFitter — the apply→measure→correct loop', () => {
     const q: Array<() => void> = []; let f = 12;
     const fitter = createFitter({ availW: () => 1130, cols: () => 100, apply: (v) => { f = v; }, painted: () => frac(0.6)(f, 100), raf: (cb) => { q.push(cb); } });
     fitter.fit(); while (q.length) q.shift()!();
-    expect(1130 - frac(0.6)(f, 100)).toBeLessThanOrEqual(FS_STEP * 0.6 * 100 + 1e-9);   // ≤ 15px, was 49px at whole-px steps
+    expect(1130 - frac(0.6)(f, 100)).toBeLessThanOrEqual(FS_STEP * 0.6 * 100 + FIT_W_BUCKET + 1e-9);   // ≤ 15px + bucket, was 49px at whole-px steps
   });
   it('is a no-op on the relayout its own font change provokes, and re-searches when the pane resizes', () => {
     const paint = renderer(0.6, 1);
@@ -159,14 +161,17 @@ describe('createFitter — the apply→measure→correct loop', () => {
       raf: (cb) => { q.push(cb); },
     });
     fitter.fit(); while (q.length) q.shift()!();
-    expect(fs).toBe(29.75);
+    expect(fs).toBe(bucketOracle(1700, 100, 0.6, 1));
     const before = applies;
     fitter.fit(); fitter.fit();                          // ResizeObserver re-entries at the same geometry
     expect(q.length).toBe(0);
     expect(applies).toBe(before);
+    availW = 1703; fitter.fit();                         // a 3px divider nudge stays inside the 8px bucket → no re-key
+    expect(q.length).toBe(0);
+    expect(applies).toBe(before);
     availW = 850;                                        // 3-wide → the pane halves
     fitter.fit(); while (q.length) q.shift()!();
-    expect(fs).toBe(14.75);                              // 100 × floor(14.75×.6)=8 → 800 ≤ 850; 15 → 9 → 900 overflows
+    expect(fs).toBe(14.75);                              // 100 × floor(14.75×.6)=8 → 800 ≤ 848; 15 → 9 → 900 overflows
     expect(paint(fs, 100)).toBeLessThanOrEqual(850);
   });
   it('re-keyed mid-flight (finding 2): the in-flight read-back re-enters the search for the CURRENT geometry', () => {
@@ -184,7 +189,7 @@ describe('createFitter — the apply→measure→correct loop', () => {
     expect(fitter.state().done).toBe(true);
     expect(fitter.state().passes).toBeGreaterThan(0);
     expect(paint(fs, 100)).toBeLessThanOrEqual(1200);
-    expect(fs).toBe(oracle(1200, 100, 0.6, 1));
+    expect(fs).toBe(bucketOracle(1200, 100, 0.6, 1));
   });
   it('re-keyed mid-flight with a stale ratio that under-reads: no overflow is left standing', () => {
     // small font at dpr 1 floors the cell hard (ratio measured ≈ .5 for a true .6) → the carried-over
@@ -202,7 +207,7 @@ describe('createFitter — the apply→measure→correct loop', () => {
     while (q.length) q.shift()!();
     expect(fitter.state().done).toBe(true);
     expect(paint(fs, 100)).toBeLessThanOrEqual(1690);
-    expect(fs).toBe(oracle(1690, 100, 0.6, 1));
+    expect(fs).toBe(bucketOracle(1690, 100, 0.6, 1));
   });
   it('pass exhaustion (finding 1): lands on the largest MEASURED fit, never on a probe', () => {
     // adversarial renderer: every other read-back reports an overflow regardless of font, the rest report
@@ -219,6 +224,39 @@ describe('createFitter — the apply→measure→correct loop', () => {
     expect(fs).toBe(st.ok);                              // what is on screen is a size that was MEASURED to fit
     expect(fs).toBeLessThan(MIRROR_FS_MAX);              // and not the last (unverified, larger) probe
   });
+  it('pass exhaustion with NOTHING ever measured to fit lands on the floor, never a probe (sweep 2 finding 3)', () => {
+    let fs = 12; const q: Array<() => void> = [];
+    // always one px over: each pass re-projects a quarter-step down and never fits, so the budget runs out
+    // with no `ok` — the fallback must be the floor, not the last (still overflowing) probe
+    const fitter = createFitter({ availW: () => 1130, cols: () => 100, apply: (v) => { fs = v; }, painted: () => 1129, raf: (cb) => { q.push(cb); } });
+    fitter.fit(); while (q.length) q.shift()!();
+    expect(fitter.state().passes).toBe(FIT_MAX_PASSES);
+    expect(fitter.state().done).toBe(true);
+    expect(fitter.state().ok).toBeUndefined();
+    expect(fs).toBe(MIRROR_FS_MIN);
+  });
+  it('unpainted read-backs (painted 0) do not spend passes and never latch done (sweep 2 finding 4)', () => {
+    const paint = renderer(0.6, 1);
+    let fs = 12, hidden = true; const q: Array<() => void> = [];
+    const fitter = createFitter({ availW: () => 1130, cols: () => 100, apply: (v) => { fs = v; }, painted: () => (hidden ? 0 : paint(fs, 100)), raf: (cb) => { q.push(cb); } });
+    fitter.fit();
+    for (let i = 0; i < 5; i++) q.shift()!();            // five blank frames
+    expect(fitter.state().passes).toBe(0);
+    expect(fitter.state().done).toBe(false);
+    hidden = false; while (q.length) q.shift()!();       // painted → converges normally
+    expect(fitter.state().done).toBe(true);
+    expect(fs).toBe(bucketOracle(1130, 100, 0.6, 1));
+    // and a host that stays blank past BLANK_FRAMES_MAX stops retrying but is NOT done — a later fit() resumes
+    let fs2 = 12, hidden2 = true; const q2: Array<() => void> = [];
+    const f2 = createFitter({ availW: () => 1130, cols: () => 100, apply: (v) => { fs2 = v; }, painted: () => (hidden2 ? 0 : paint(fs2, 100)), raf: (cb) => { q2.push(cb); } });
+    f2.fit(); let n = 0; while (q2.length && n < 200) { q2.shift()!(); n++; }
+    expect(n).toBe(BLANK_FRAMES_MAX);
+    expect(f2.state().done).toBe(false);
+    expect(f2.state().passes).toBe(0);
+    hidden2 = false; f2.fit(); while (q2.length) q2.shift()!();
+    expect(f2.state().done).toBe(true);
+    expect(fs2).toBe(bucketOracle(1130, 100, 0.6, 1));
+  });
   it('waits for real column counts (finding 5): cols ≤ 0 applies nothing', () => {
     let applies = 0; const q: Array<() => void> = [];
     const fitter = createFitter({ availW: () => 1700, cols: () => 0, apply: () => { applies++; }, painted: () => 0, raf: (cb) => { q.push(cb); } });
@@ -229,20 +267,94 @@ describe('createFitter — the apply→measure→correct loop', () => {
   });
 });
 
-describe('rowProjectionFont — the relay row count is independent of the zoom (finding 3)', () => {
-  const rowsFor = (availH: number, cellPerFs: number, fs: number) => Math.max(10, Math.min(160, Math.floor(availH / (cellPerFs * fs))));
-  it('is exactly the pre-zoom projection (16px ceiling) — a 3400px pane keeps its rows', () => {
-    const prePR = (availW: number, cols: number) => Math.max(4, Math.min(16, Math.floor(availW / (cols * 0.62))));
-    for (const w of [380, 850, 1130, 1700, 2540, 3400]) {
-      expect(rowProjectionFont(w, 100)).toBe(prePR(w, 100));
-    }
-    // a ~900px-tall pane, 1.2 cell-height per font px: 47 rows before; 47 rows now — not 13 at the 56px zoom
-    expect(rowsFor(900, 1.2, rowProjectionFont(3400, 100, 0.6))).toBe(rowsFor(900, 1.2, 16));
-    expect(rowsFor(900, 1.2, rowProjectionFont(3400, 100, 0.6))).toBe(46);
-    expect(rowsFor(900, 1.2, fitFontSize(3400, 100, 0.6))).toBe(13);      // what the zoomed font WOULD have asked for
+describe('height bound + relay rows — the whole TUI stays on screen; the head never drops below MIN_RELAY_ROWS', () => {
+  const CPF = 1.2;   // renderer cell-height per font px (xterm ≈ 1.2)
+  // the fitter as HeadTerminal wires it: width fit + height cap for MIN_RELAY_ROWS; rows from the applied font
+  const fitPane = (availW: number, availH: number, ratio: number, dpr: number) => {
+    const paint = renderer(ratio, dpr);
+    let fs = 12; const q: Array<() => void> = [];
+    const fitter = createFitter({
+      availW: () => availW, cols: () => 100, apply: (v) => { fs = v; }, painted: () => paint(fs, 100), raf: (cb) => { q.push(cb); },
+      maxFs: () => heightBoundFont(availH, CPF, MIN_RELAY_ROWS),
+    });
+    fitter.fit(); while (q.length) q.shift()!();
+    expect(fitter.state().done).toBe(true);
+    const rows = relayRows(availH, CPF, fs);
+    return { fs, rows, painted: paint(fs, 100), mirrorH: rows * CPF * fs };
+  };
+  it('heightBoundFont: the largest font at which N rows fit', () => {
+    expect(heightBoundFont(900, CPF, MIN_RELAY_ROWS)).toBe(31.25);   // 900 / (24 × 1.2) = 31.25
+    expect(heightBoundFont(900, CPF, 46)).toBe(16.25);
+    expect(heightBoundFont(0, CPF, 24)).toBe(MIRROR_FS_MAX);        // unknown → no bound
+    expect(heightBoundFont(900, 0, 24)).toBe(MIRROR_FS_MAX);
   });
-  it('never exceeds the zoomed font (rows must still fit an un-zoomed mirror)', () => {
-    for (const w of [380, 850, 1130]) expect(rowProjectionFont(w, 100)).toBeLessThanOrEqual(fitFontSize(w, 100));
-    expect(ROW_PROJECTION_FS_MAX).toBe(16);
+  it('relayRows: rows that fit at the APPLIED font, floored and capped', () => {
+    expect(relayRows(900, CPF, 16)).toBe(46);
+    expect(relayRows(900, CPF, 28.25)).toBe(26);
+    expect(relayRows(900, CPF, 56.5)).toBe(MIN_RELAY_ROWS);          // the zoom would leave 13 → floor 24
+    expect(relayRows(2000, CPF, 6)).toBe(MAX_RELAY_ROWS);
+    expect(relayRows(0, CPF, 16)).toBe(MIN_RELAY_ROWS);
+    expect(MIN_RELAY_ROWS).toBe(24);
+  });
+  it('2-wide desktop (1700×900): width-bound zoom, ~26 rows, mirror fits the pane — nothing clipped', () => {
+    const r = fitPane(1700, 900, 0.6, 1);
+    expect(r.fs).toBe(bucketOracle(1700, 100, 0.6, 1));              // width is the binding axis
+    expect(r.fs).toBeGreaterThan(16);
+    expect(r.rows).toBeGreaterThanOrEqual(MIN_RELAY_ROWS);
+    expect(r.mirrorH).toBeLessThanOrEqual(900);                      // ALL rows on screen
+    expect(r.painted).toBeLessThanOrEqual(1700);
+  });
+  it('1-wide ultrawide (3400×900): height-bound — the head keeps 24 rows and a right gap remains by design', () => {
+    const r = fitPane(3400, 900, 0.6, 1);
+    expect(r.fs).toBeLessThanOrEqual(31);                            // cap floor(31.25) = 31, not the 56.5 width fit
+    expect(r.rows).toBe(MIN_RELAY_ROWS);
+    expect(r.mirrorH).toBeLessThanOrEqual(900);
+    expect(r.painted).toBeLessThan(3400);                            // the gap is the pane's aspect, not the fit
+    expect(r.fs).toBeGreaterThan(16);                                // still 2× the old cap
+  });
+  it('3-wide desktop (1130×900) and a phone (380×700): width-bound, rows follow', () => {
+    const d = fitPane(1130, 900, 0.6, 1);
+    expect(d.fs).toBe(bucketOracle(1130, 100, 0.6, 1));
+    expect(d.rows).toBeGreaterThanOrEqual(36);                       // 900 / (1.2 × ~19.5px) ≈ 37
+    expect(d.mirrorH).toBeLessThanOrEqual(900);
+    const p = fitPane(380, 700, 0.6, 2);
+    expect(p.fs).toBe(bucketOracle(380, 100, 0.6, 2));
+    expect(p.rows).toBeLessThanOrEqual(MAX_RELAY_ROWS);
+    expect(p.mirrorH).toBeLessThanOrEqual(700);
+  });
+  it('a wobbling non-binding height cap does not re-fit (line-height rounding at small fonts)', () => {
+    const paint = renderer(0.6, 2);
+    let fs = 12, applies = 0, capNow = 21; const q: Array<() => void> = [];
+    const fitter = createFitter({ availW: () => 380, cols: () => 100, apply: (v) => { if (v !== fs) applies++; fs = v; }, painted: () => paint(fs, 100), raf: (cb) => { q.push(cb); }, maxFs: () => capNow });
+    fitter.fit(); while (q.length) q.shift()!();
+    expect(fitter.state().done).toBe(true);
+    const settled = fs, before = applies;
+    for (const c of [20, 21, 20, 22, 21]) { capNow = c; fitter.fit(); }   // cap wobbles far above the ~6px font
+    expect(q.length).toBe(0);
+    expect(applies).toBe(before);
+    expect(fs).toBe(settled);
+  });
+  it('a height cap that comes to bind restarts the search; one that loosens while binding restarts too', () => {
+    const paint = renderer(0.6, 1);
+    let fs = 12, capNow = 64; const q: Array<() => void> = [];
+    const fitter = createFitter({ availW: () => 3400, cols: () => 100, apply: (v) => { fs = v; }, painted: () => paint(fs, 100), raf: (cb) => { q.push(cb); }, maxFs: () => capNow });
+    fitter.fit(); while (q.length) q.shift()!();
+    expect(fs).toBeGreaterThan(50);                      // width-bound on an ultrawide
+    capNow = 31; fitter.fit(); while (q.length) q.shift()!();   // pane got short → cap binds
+    expect(fs).toBeLessThanOrEqual(31);
+    expect(fitter.state().done).toBe(true);
+    capNow = 40; fitter.fit(); while (q.length) q.shift()!();   // pane got taller → cap loosens while binding
+    expect(fs).toBeGreaterThan(31);
+    expect(fs).toBeLessThanOrEqual(40);
+  });
+  it('invariant over a geometry grid: mirror fits both axes; a right gap exists ONLY when the row floor binds', () => {
+    for (const w of [380, 850, 1130, 1700, 1920, 2540, 3400]) for (const h of [500, 700, 900, 1200]) for (const dpr of [1, 2]) {
+      const r = fitPane(w, h, 0.6, dpr);
+      expect(r.painted, `overflow-x w=${w} h=${h}`).toBeLessThanOrEqual(w);
+      expect(r.mirrorH, `overflow-y w=${w} h=${h}`).toBeLessThanOrEqual(h + 1e-9);
+      expect(r.rows).toBeGreaterThanOrEqual(MIN_RELAY_ROWS);
+      const widthFit = bucketOracle(w, 100, 0.6, dpr);
+      if (r.fs < widthFit) expect(r.rows, `gap without the floor binding w=${w} h=${h}`).toBe(MIN_RELAY_ROWS);
+    }
   });
 });

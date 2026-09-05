@@ -44,7 +44,8 @@ export {
 
 // fit-to-width arithmetic behind HeadTerminal's mirror font (v0.11.1) — pure, reusable by consumers.
 export {
-  createFitter, fitFontSize, nextFit, rowProjectionFont,
-  CHAR_RATIO_DEFAULT, MIRROR_FS_MIN, MIRROR_FS_MAX, FS_STEP, FIT_MAX_PASSES, ROW_PROJECTION_FS_MAX,
+  createFitter, fitFontSize, nextFit, heightBoundFont, relayRows, bucketWidth,
+  CHAR_RATIO_DEFAULT, MIRROR_FS_MIN, MIRROR_FS_MAX, FS_STEP, FIT_MAX_PASSES,
+  MIN_RELAY_ROWS, MAX_RELAY_ROWS, FIT_W_BUCKET, BLANK_FRAMES_MAX,
   type FitState, type Fitter, type FitterIO,
 } from './fitFont';
