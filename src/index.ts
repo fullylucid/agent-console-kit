@@ -41,3 +41,10 @@ export {
   type HeadStatus, type SessionUsage, type Limits, type ModelLimit,
   type CompactAction, type RefreshAction, type InterruptAction,
 } from './status/types';
+
+// fit-to-width arithmetic behind HeadTerminal's mirror font (v0.11.1) — pure, reusable by consumers.
+export {
+  createFitter, fitFontSize, nextFit, rowProjectionFont,
+  CHAR_RATIO_DEFAULT, MIRROR_FS_MIN, MIRROR_FS_MAX, FS_STEP, FIT_MAX_PASSES, ROW_PROJECTION_FS_MAX,
+  type FitState, type Fitter, type FitterIO,
+} from './fitFont';

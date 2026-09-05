@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import 'xterm/css/xterm.css';
 import { C } from './render/tokens';
-import { CHAR_RATIO_DEFAULT, createFitter, fitFontSize } from './fitFont';
+import { CHAR_RATIO_DEFAULT, createFitter, rowProjectionFont } from './fitFont';
 
 // HeadTerminal — the reusable raw-TUI engine (extracted from TerminalPanel so the console head-view
 // and the terminal drawer share ONE implementation, no copy-paste). It owns the whole lifecycle for a
@@ -372,9 +372,12 @@ export default function HeadTerminal({
       term.options.fontSize = fs;                      // xterm re-measures cells on the next render
       try { term.refresh(0, term.rows - 1); } catch { /* */ }
     };
+    // `sized` flips when the relay's first size event lands (real pane cols). Until then xterm reports its
+    // default 80 and a fit would converge for the wrong width, then visibly re-fit — so the fitter waits.
+    let sized = false;
     const fitter = createFitter({
       availW: () => (hostRef.current ? hostRef.current.clientWidth - 12 : 0),   // host has 6px padding on each side
-      cols: () => term.cols,
+      cols: () => (sized ? term.cols : 0),
       apply: applyFs,
       painted: () => { const el = hostRef.current?.querySelector('.xterm-screen'); return el ? el.getBoundingClientRect().width : 0; },
       raf: (cb) => { requestAnimationFrame(cb); },
@@ -426,7 +429,6 @@ export default function HeadTerminal({
     // font fit-to-width WOULD pick for TARGET cols. NOT recomputed while the keyboard is open (spec: never
     // shrink rows — #72's slide tucks the top under the header instead). Converges in 1 POST (+ at most one
     // ±1-2 row rounding correction); cols are pinned to TARGET and never oscillate.
-    let sized = false;                                 // set once the first size event lands (real pane cols)
     const resizeMirror = () => {
       if (kind !== 'pane' || !interactive || !sized) return;   // wait for real pane cols (not xterm's 80)
       const sid = sidRef.current;
@@ -436,14 +438,14 @@ export default function HeadTerminal({
       if (vv && window.innerHeight - vv.height > 100) return;
       const curFs = (term.options.fontSize as number) || 1;
       const cellPerFs = (el.offsetHeight / term.rows) / curFs;   // renderer cell-height per font-px (stable across sizes)
-      // Drive the pane to TARGET_MIRROR_COLS. Project the cell height for the font fit-to-width WOULD pick
-      // at that col count (bigger cells → fewer rows), and derive rows from THAT — so the single POST is
-      // {cols:TARGET, rows: rowsForTheTargetFont}. After the relay reflows the pane + the size event returns
-      // TARGET cols, fitFont re-sizes the font to exactly this projection and rows already (nearly) match →
-      // no 120→rows→re-rows oscillation. (ratio/formula shared with fitFont; the only residual is the
-      // renderer's integer cell-height rounding → at most one ±1-2 row corrective POST, never a col bounce.)
+      // Drive the pane to TARGET_MIRROR_COLS. Project the cell height for the ROW-PROJECTION font at that col
+      // count (the fit-to-width font capped at ROW_PROJECTION_FS_MAX — the pre-zoom value) and derive rows
+      // from THAT, so the single POST is {cols:TARGET, rows: rowsThatFitUnzoomed}. The mirror's ZOOM never
+      // drives this number: rows are the head's REAL PTY, and a zoomed 3400px pane would otherwise reflow
+      // the head to 100×10 (PR #7 finding 3). When the zoomed mirror is taller than the pane, slide() shows
+      // its bottom (prompt + latest output) and tucks the top under the header — the keyboard-open behavior.
       const availW = host.clientWidth - 12;
-      const projCellPx = cellPerFs * fitFontSize(availW, TARGET_MIRROR_COLS, fitter.state().ratio);   // measured ratio once known
+      const projCellPx = cellPerFs * rowProjectionFont(availW, TARGET_MIRROR_COLS, fitter.state().ratio);   // measured ratio once known
       const chrome = block.offsetHeight - host.offsetHeight;   // controls + key-bar + composer (non-terminal)
       const avail = root.clientHeight - chrome - 12;   // px for terminal CONTENT (host has 6px top+bottom pad)
       if (!(projCellPx > 0) || avail <= 0) return;     // mid-layout / not painted → skip this measurement

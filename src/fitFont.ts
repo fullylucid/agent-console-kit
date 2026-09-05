@@ -23,6 +23,11 @@ export const MIRROR_FS_MAX = 64;
 export const FS_STEP = 0.25;
 /** Conservative default advance ratio (cell width ÷ font px) used before the first measurement. */
 export const CHAR_RATIO_DEFAULT = 0.62;
+/** The font the RELAY row projection is computed from is capped here — the pre-zoom ceiling. Zooming the
+ *  mirror's font must never shrink the head's real PTY: rows are what fit the pane at ≤ this font (exactly the
+ *  pre-2026-09-04 projection), so a 3400px pane keeps the ~47 rows it had, and the zoomed mirror overflows
+ *  the pane vertically (slide) rather than reflowing the head to 100×10. (PR #7 review, finding 3.) */
+export const ROW_PROJECTION_FS_MAX = 16;
 /** Bound on correction passes per fit — each pass is one rAF; convergence is normally 3–6 (grow, bisect, settle). */
 export const FIT_MAX_PASSES = 10;
 /** After a grow, the search ceiling is pulled down to the projection + this many cell-px worth of font — the
@@ -92,10 +97,15 @@ export const nextFit = (state: FitState, renderedW: number, availW: number, cols
 
 /** What the fitter needs from its host — narrow so a test (or a headless probe page) can drive the REAL
  *  loop against a real or fake xterm. */
+/** Font to project the relay's ROW count from: the fit-to-width font, capped at ROW_PROJECTION_FS_MAX. Never
+ *  above the zoomed font (rows must fit the mirror when it is not zoomed), never driven up by the zoom. */
+export const rowProjectionFont = (availW: number, cols: number, ratio = CHAR_RATIO_DEFAULT) =>
+  clamp(Math.floor(availW / (Math.max(1, cols) * ratio)), ROW_PROJECTION_FS_MAX);   // whole px: bit-identical to the pre-zoom projection
+
 export interface FitterIO {
   /** Width available for cells (host inner width). ≤ 0 → not laid out yet. */
   availW: () => number;
-  /** Current column count of the terminal. */
+  /** Current column count of the terminal; ≤ 0 while the real count is not yet known (fit waits). */
   cols: () => number;
   /** Set the terminal font (px); must be idempotent. */
   apply: (fs: number) => void;
@@ -114,7 +124,8 @@ export interface Fitter {
 
 /**
  * The fit-to-width loop HeadTerminal runs for a mirrored pane: project → apply → (next paint) read back →
- * correct, until the largest non-overflowing font is found (`done`) or FIT_MAX_PASSES is spent. State is keyed on `${availW}x${cols}`: new geometry restarts from the last MEASURED ratio; the
+ * correct, until the largest non-overflowing font is found (`done`); if FIT_MAX_PASSES is spent first, the
+ * largest MEASURED fit (`ok`) is applied — never an unverified probe. State is keyed on `${availW}x${cols}`: new geometry restarts from the last MEASURED ratio; the
  * relayout the font change itself provokes (host height moves → ResizeObserver) hits the converged key.
  */
 export const createFitter = (io: FitterIO): Fitter => {
@@ -122,8 +133,8 @@ export const createFitter = (io: FitterIO): Fitter => {
   let pending = false;                                 // one read-back in flight at a time
   const step = () => {
     const availW = io.availW();
-    if (availW <= 0) return;
-    const cols = io.cols() || 80;
+    const cols = io.cols();
+    if (availW <= 0 || cols <= 0) return;              // not laid out / real cols not known yet → nothing to fit
     const key = `${availW}x${cols}`;
     if (fit.key !== key) {
       fit = { key, fs: fitFontSize(availW, cols, fit.ratio), ok: undefined, ceil: MIRROR_FS_MAX, ratio: fit.ratio, done: false, passes: 0 };
@@ -133,9 +144,12 @@ export const createFitter = (io: FitterIO): Fitter => {
     pending = true;
     io.raf(() => {
       pending = false;
-      if (fit.key !== key) return;                     // geometry moved under us; its own re-key restarts the search
+      if (fit.key !== key) { step(); return; }         // geometry moved mid-flight → search the CURRENT geometry (never stall)
       const nx = nextFit({ fs: fit.fs, ok: fit.ok, ceil: fit.ceil, ratio: fit.ratio }, io.painted(), availW, cols);
       fit = { ...fit, ...nx, passes: fit.passes + 1 };
+      if (!fit.done && fit.passes >= FIT_MAX_PASSES) {  // budget spent: land on the largest MEASURED fit, never a probe
+        fit = { ...fit, fs: fit.ok ?? fit.fs, done: true };
+      }
       io.apply(fit.fs);
       if (!fit.done) step();
     });

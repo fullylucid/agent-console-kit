@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FS_STEP, MIRROR_FS_MAX, MIRROR_FS_MIN, createFitter, fitFontSize, nextFit, type FitState } from './fitFont';
+import { CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FS_STEP, MIRROR_FS_MAX, MIRROR_FS_MIN, ROW_PROJECTION_FS_MAX, createFitter, fitFontSize, nextFit, rowProjectionFont, type FitState } from './fitFont';
 
 // A model of xterm's cell rounding: char advance = fs × ratio in CSS px, the cell is floored to whole
 // DEVICE pixels, and the screen is cols × cell. Monotonic in fs. (xterm 5.3 DomRenderer: cell.width =
@@ -168,5 +168,81 @@ describe('createFitter — the apply→measure→correct loop', () => {
     fitter.fit(); while (q.length) q.shift()!();
     expect(fs).toBe(14.75);                              // 100 × floor(14.75×.6)=8 → 800 ≤ 850; 15 → 9 → 900 overflows
     expect(paint(fs, 100)).toBeLessThanOrEqual(850);
+  });
+  it('re-keyed mid-flight (finding 2): the in-flight read-back re-enters the search for the CURRENT geometry', () => {
+    const paint = renderer(0.6, 1);
+    let fs = 12, availW = 1700;
+    const q: Array<() => void> = [];
+    const fitter = createFitter({ availW: () => availW, cols: () => 100, apply: (v) => { fs = v; }, painted: () => paint(fs, 100), raf: (cb) => { q.push(cb); } });
+    fitter.fit();                                        // read-back for 1700 is now in flight
+    expect(q.length).toBe(1);
+    availW = 1200;                                       // the pane shrinks BEFORE the read-back lands
+    fitter.fit();                                        // re-keys, applies the raw projection, returns on `pending`
+    expect(q.length).toBe(1);
+    while (q.length) q.shift()!();                       // the stale callback must reschedule, not bail
+    expect(fitter.state().key).toBe('1200x100');
+    expect(fitter.state().done).toBe(true);
+    expect(fitter.state().passes).toBeGreaterThan(0);
+    expect(paint(fs, 100)).toBeLessThanOrEqual(1200);
+    expect(fs).toBe(oracle(1200, 100, 0.6, 1));
+  });
+  it('re-keyed mid-flight with a stale ratio that under-reads: no overflow is left standing', () => {
+    // small font at dpr 1 floors the cell hard (ratio measured ≈ .5 for a true .6) → the carried-over
+    // projection for a WIDE pane overshoots by ~20%; the stall would have left that overflow on screen
+    const paint = renderer(0.6, 1);
+    let fs = 12, availW = 340;
+    const q: Array<() => void> = [];
+    const fitter = createFitter({ availW: () => availW, cols: () => 100, apply: (v) => { fs = v; }, painted: () => paint(fs, 100), raf: (cb) => { q.push(cb); } });
+    fitter.fit(); while (q.length) q.shift()!();         // converge small → ratio measured under flooring
+    expect(fitter.state().ratio!).toBeLessThan(0.6);
+    fitter.fit();                                        // (no-op: converged)
+    availW = 1700; fitter.fit();                         // re-key → projection from the stale ratio
+    expect(q.length).toBe(1);
+    availW = 1690; fitter.fit();                         // and re-key AGAIN while that read-back is in flight
+    while (q.length) q.shift()!();
+    expect(fitter.state().done).toBe(true);
+    expect(paint(fs, 100)).toBeLessThanOrEqual(1690);
+    expect(fs).toBe(oracle(1690, 100, 0.6, 1));
+  });
+  it('pass exhaustion (finding 1): lands on the largest MEASURED fit, never on a probe', () => {
+    // adversarial renderer: every other read-back reports an overflow regardless of font, the rest report
+    // a fit with a tiny ratio — the measurement is non-monotone, so bisection cannot settle inside the budget
+    let calls = 0;
+    const paint = (f: number, cols: number) => { calls++; return calls % 2 === 0 ? cols * f * 2 : cols * f * 0.3; };
+    let fs = 12; const q: Array<() => void> = [];
+    const fitter = createFitter({ availW: () => 1000, cols: () => 100, apply: (v) => { fs = v; }, painted: () => paint(fs, 100), raf: (cb) => { q.push(cb); } });
+    fitter.fit(); while (q.length) q.shift()!();
+    const st = fitter.state();
+    expect(st.passes).toBe(FIT_MAX_PASSES);
+    expect(st.done).toBe(true);
+    expect(st.ok).toBeDefined();
+    expect(fs).toBe(st.ok);                              // what is on screen is a size that was MEASURED to fit
+    expect(fs).toBeLessThan(MIRROR_FS_MAX);              // and not the last (unverified, larger) probe
+  });
+  it('waits for real column counts (finding 5): cols ≤ 0 applies nothing', () => {
+    let applies = 0; const q: Array<() => void> = [];
+    const fitter = createFitter({ availW: () => 1700, cols: () => 0, apply: () => { applies++; }, painted: () => 0, raf: (cb) => { q.push(cb); } });
+    fitter.fit();
+    expect(applies).toBe(0);
+    expect(q.length).toBe(0);
+    expect(fitter.state().key).toBe('');
+  });
+});
+
+describe('rowProjectionFont — the relay row count is independent of the zoom (finding 3)', () => {
+  const rowsFor = (availH: number, cellPerFs: number, fs: number) => Math.max(10, Math.min(160, Math.floor(availH / (cellPerFs * fs))));
+  it('is exactly the pre-zoom projection (16px ceiling) — a 3400px pane keeps its rows', () => {
+    const prePR = (availW: number, cols: number) => Math.max(4, Math.min(16, Math.floor(availW / (cols * 0.62))));
+    for (const w of [380, 850, 1130, 1700, 2540, 3400]) {
+      expect(rowProjectionFont(w, 100)).toBe(prePR(w, 100));
+    }
+    // a ~900px-tall pane, 1.2 cell-height per font px: 47 rows before; 47 rows now — not 13 at the 56px zoom
+    expect(rowsFor(900, 1.2, rowProjectionFont(3400, 100, 0.6))).toBe(rowsFor(900, 1.2, 16));
+    expect(rowsFor(900, 1.2, rowProjectionFont(3400, 100, 0.6))).toBe(46);
+    expect(rowsFor(900, 1.2, fitFontSize(3400, 100, 0.6))).toBe(13);      // what the zoomed font WOULD have asked for
+  });
+  it('never exceeds the zoomed font (rows must still fit an un-zoomed mirror)', () => {
+    for (const w of [380, 850, 1130]) expect(rowProjectionFont(w, 100)).toBeLessThanOrEqual(fitFontSize(w, 100));
+    expect(ROW_PROJECTION_FS_MAX).toBe(16);
   });
 });
