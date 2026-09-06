@@ -133,8 +133,13 @@ export interface FitterIO {
   apply: (fs: number) => void;
   /** Width xterm painted for the current cols at the current font (the `.xterm-screen` box); 0 if unpainted. */
   painted: () => number;
-  /** Schedule a callback after the next paint (requestAnimationFrame in the browser). */
-  raf: (cb: () => void) => void;
+  /** Schedule a callback after the next paint (requestAnimationFrame in the browser).
+   *  May return the handle; if it does and `cancelRaf` is given, `cancel()` will use it. */
+  raf: (cb: () => void) => void | number;
+  /** Optional: cancel a handle returned by `raf` (cancelAnimationFrame). The fitter is correct
+   *  without this — `cancel()` gates the callback body regardless — but it stops a dead frame
+   *  from being scheduled at all. */
+  cancelRaf?: (handle: number) => void;
   /** Optional upper bound on the font from another axis (height: heightBoundFont), floored to whole px.
    *  Consulted every step; restarts the search only when it binds. Omit / return ≥ MIRROR_FS_MAX for width-only. */
   maxFs?: () => number;
@@ -143,6 +148,13 @@ export interface FitterIO {
 export interface Fitter {
   /** Run one fit step for the current geometry; safe to call on every relayout — a converged geometry is a no-op. */
   fit: () => void;
+  /** Stop the loop and disarm any read-back already scheduled.
+   *
+   *  A fit step schedules work for the NEXT paint, so a fitter torn down mid-search leaves a
+   *  callback that wakes up against a terminal its owner has already disposed of — it reads
+   *  `.xterm-screen` from a detached node and applies a font to a dead instance. Idempotent, and
+   *  once cancelled a fitter stays cancelled: a stale timer must not be able to revive it. */
+  cancel: () => void;
   /** Read-only view of the search state. */
   state: () => Readonly<FitState & { key: string; passes: number }>;
 }
@@ -157,6 +169,8 @@ export const createFitter = (io: FitterIO): Fitter => {
   let fit: FitState & { key: string; passes: number } = { key: '', fs: 0, ceil: MIRROR_FS_MAX, done: false, passes: 0 };
   let cap = MIRROR_FS_MAX;                             // height bound in force for the current search
   let pending = false;                                 // one read-back in flight at a time
+  let dead = false;                                    // cancelled: no new work, and any in-flight read-back is a no-op
+  let handle: number | undefined;                      // the scheduled read-back, when io.raf returns one
   let blank = 0;                                       // consecutive unpainted read-backs for this key
   const restart = (key: string, availW: number, cols: number, newCap: number) => {
     cap = newCap;
@@ -165,6 +179,7 @@ export const createFitter = (io: FitterIO): Fitter => {
     io.apply(fit.fs);
   };
   const step = () => {
+    if (dead) return;
     const availW = bucketWidth(io.availW());
     const cols = io.cols();
     if (availW <= 0 || cols <= 0) return;              // not laid out / real cols not known yet → nothing to fit
@@ -179,8 +194,11 @@ export const createFitter = (io: FitterIO): Fitter => {
     else if (newCap < fit.fs || (newCap >= cap + CAP_LOOSEN_PX && fit.fs >= cap)) restart(key, availW, cols, newCap);
     if (fit.done || fit.passes >= FIT_MAX_PASSES || pending) return;
     pending = true;
-    io.raf(() => {
+    const h = io.raf(() => {
       pending = false;
+      handle = undefined;
+      if (dead) return;                                // torn down between scheduling and paint
+
       if (fit.key !== key) { step(); return; }         // geometry moved mid-flight → search the CURRENT geometry (never stall)
       const painted = io.painted();
       if (!(painted > 0)) {                            // nothing painted: not a measurement — retry, don't spend a pass, never latch
@@ -196,6 +214,13 @@ export const createFitter = (io: FitterIO): Fitter => {
       io.apply(fit.fs);
       if (!fit.done) step();
     });
+    if (typeof h === 'number') handle = h;
   };
-  return { fit: step, state: () => fit };
+  const cancel = () => {
+    dead = true;
+    pending = false;
+    if (handle !== undefined && io.cancelRaf) { io.cancelRaf(handle); }
+    handle = undefined;
+  };
+  return { fit: step, cancel, state: () => fit };
 };

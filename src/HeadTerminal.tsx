@@ -412,7 +412,8 @@ export default function HeadTerminal({
       cols: () => (sized || colsFallback ? term.cols : 0),
       apply: applyFs,
       painted: () => { const el = hostRef.current?.querySelector('.xterm-screen'); return el ? el.getBoundingClientRect().width : 0; },
-      raf: (cb) => { requestAnimationFrame(cb); },
+      raf: (cb) => requestAnimationFrame(cb),
+      cancelRaf: (h) => cancelAnimationFrame(h),
       // height bound: interactive mirrors get their rows from the relay (≥ MIN_RELAY_ROWS must fit);
       // a read-only mirror keeps the head's rows, so ALL of them must fit.
       maxFs: () => heightBoundFont(availH(), cellPerFs(), interactive ? MIN_RELAY_ROWS : term.rows),
@@ -572,6 +573,11 @@ export default function HeadTerminal({
       clearTimeout(colsFallbackTimer);
       clearTimeout(retryTimer);
       ro.disconnect();
+      // The fit loop schedules its read-back for the NEXT paint, so a teardown mid-search leaves a
+      // callback that would wake against the terminal teardownXterm() is about to dispose — reading
+      // .xterm-screen off a detached node and applying a font to a dead instance. This effect is
+      // keyed on sess?.sid, so it runs on every session change, which is exactly when that happens.
+      fitter.cancel();
       if (interactive && host) {
         host.removeEventListener('touchstart', onTS, { capture: true });
         host.removeEventListener('touchmove', onTM, { capture: true });

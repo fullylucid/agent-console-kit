@@ -116,6 +116,85 @@ describe('nextFit — the correction against the rendered width', () => {
   });
 });
 
+describe('createFitter — cancel() disarms a read-back already scheduled', () => {
+  // A fit step schedules its read-back for the NEXT paint. A fitter torn down mid-search left that
+  // callback alive, so it woke against a terminal its owner had already disposed of — reading
+  // .xterm-screen from a detached node and applying a font to a dead xterm. HeadTerminal's effect
+  // is keyed on sess?.sid, so teardown-mid-search is a session change, not a rare race.
+  const rig = () => {
+    const q: Array<() => void> = [];
+    const applied: number[] = [];
+    const cancelled: number[] = [];
+    let painted = 0;
+    const fitter = createFitter({
+      availW: () => 800, cols: () => 100,
+      apply: (v) => { applied.push(v); },
+      painted: () => painted,
+      raf: (cb) => { q.push(cb); return q.length; },
+      cancelRaf: (h) => { cancelled.push(h); },
+    });
+    return { q, applied, cancelled, fitter, paint: (w: number) => { painted = w; } };
+  };
+
+  it('a read-back that lands after cancel() applies nothing', () => {
+    const r = rig();
+    r.paint(700);
+    r.fitter.fit();
+    expect(r.q.length).toBe(1);              // one read-back in flight
+    const before = r.applied.length;
+    r.fitter.cancel();
+    r.q.shift()!();                          // the paint arrives anyway — the browser does not care
+    expect(r.applied.length).toBe(before);   // …and nothing is applied to the dead terminal
+    expect(r.q.length).toBe(0);              // nor is more work scheduled
+  });
+
+  it('cancel() uses cancelRaf when the host provides a handle', () => {
+    const r = rig();
+    r.paint(700);
+    r.fitter.fit();
+    r.fitter.cancel();
+    expect(r.cancelled).toEqual([1]);        // the handle raf returned
+  });
+
+  it('a cancelled fitter stays cancelled — a stale timer must not revive it', () => {
+    const r = rig();
+    r.paint(700);
+    r.fitter.fit();
+    r.fitter.cancel();
+    const before = r.applied.length;
+    const queued = r.q.length;               // the rig's cancelRaf RECORDS rather than splices, which
+                                             // is the honest model: a frame the browser already
+                                             // committed can still fire. What must not happen is NEW
+                                             // work being scheduled, or anything being applied.
+    r.fitter.fit();                          // e.g. a ResizeObserver that fired during teardown
+    expect(r.q.length).toBe(queued);
+    expect(r.applied.length).toBe(before);
+  });
+
+  it('cancel() is idempotent', () => {
+    const r = rig();
+    r.fitter.fit();
+    r.fitter.cancel();
+    expect(() => { r.fitter.cancel(); r.fitter.cancel(); }).not.toThrow();
+  });
+
+  it('cancelRaf is optional — a host without it is still correct', () => {
+    const q: Array<() => void> = [];
+    const applied: number[] = [];
+    const f = createFitter({
+      availW: () => 800, cols: () => 100,
+      apply: (v) => { applied.push(v); },
+      painted: () => 700,
+      raf: (cb) => { q.push(cb); },          // returns nothing, like the old signature
+    });
+    f.fit();
+    const before = applied.length;
+    f.cancel();
+    q.shift()!();
+    expect(applied.length).toBe(before);
+  });
+});
+
 describe('createFitter — the apply→measure→correct loop', () => {
   const widths = [340, 380, 600, 850, 1130, 1700, 2540, 3400];
   const cols = [80, 100, 120];
