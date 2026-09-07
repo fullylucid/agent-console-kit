@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BLANK_FRAMES_MAX, CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FIT_W_BUCKET, FS_STEP, MAX_RELAY_ROWS, MIN_RELAY_ROWS, MIRROR_FS_MAX, MIRROR_FS_MIN, bucketWidth, createFitter, fitFontSize, heightBoundFont, nextFit, relayRows, type FitState } from './fitFont';
+import { BLANK_FRAMES_MAX, CAP_LOOSEN_PX, CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FIT_W_BUCKET, FS_STEP, MAX_RELAY_ROWS, MIN_RELAY_ROWS, MIRROR_FS_MAX, MIRROR_FS_MIN, bucketWidth, createFitter, fitFontSize, heightBoundFont, nextFit, relayRows, type FitState } from './fitFont';
 
 // A model of xterm's cell rounding: char advance = fs × ratio in CSS px, the cell is floored to whole
 // DEVICE pixels, and the screen is cols × cell. Monotonic in fs. (xterm 5.3 DomRenderer: cell.width =
@@ -435,5 +435,79 @@ describe('height bound + relay rows — the whole TUI stays on screen; the head 
       const widthFit = bucketOracle(w, 100, 0.6, dpr);
       if (r.fs < widthFit) expect(r.rows, `gap without the floor binding w=${w} h=${h}`).toBe(MIN_RELAY_ROWS);
     }
+  });
+});
+
+describe('cap hysteresis — a wobbling height bound must not restart the search forever', () => {
+  // FINDING 4 (e2bbeb): the coupled maxFs(font) loop had coverage, but NOT the interaction the
+  // finding named — CAP_LOOSEN_PX against a cap that moves. The renderer's line-height rounding
+  // makes the height bound read N±1 at the bound itself, so the rule is deliberately asymmetric:
+  // a cap that DROPS below the font restarts always (otherwise rows overflow off the pane), while
+  // a cap that RISES only restarts once it has risen by CAP_LOOSEN_PX — a 1px wobble that
+  // restarted would ping-pong 32↔33 for as long as the pane sat at that size.
+  // availW is deliberately HUGE so width never binds: these cases are about the HEIGHT cap, and a
+  // width-limited fit would settle under the cap and pass every assertion below without the guard
+  // existing at all. (First draft used availW 800, which settled at 16 under a cap of 20 — the
+  // tests passed for the wrong reason. Kept as a note because it is the easy mistake here.)
+  const drive = (capNow: () => number, availW = 40000) => {
+    let fs = 12; const q: Array<() => void> = [];
+    const fitter = createFitter({
+      availW: () => availW, cols: () => 100, apply: (v) => { fs = v; },
+      painted: () => fs * 100 * 0.5, raf: (cb) => { q.push(cb); }, maxFs: capNow,
+    });
+    const pump = () => { fitter.fit(); while (q.length) q.shift()!(); };
+    return { pump, state: () => fitter.state(), fs: () => fs };
+  };
+
+  it('a cap that DROPS below the font in place restarts — rows must never overflow the pane', () => {
+    let cap = 40;
+    const d = drive(() => cap);
+    d.pump();
+    expect(d.state().done).toBe(true);
+    const settled = d.fs();
+    cap = Math.max(MIRROR_FS_MIN, settled - 1);          // the bound fell UNDER the font in place
+    d.pump();
+    expect(d.fs()).toBeLessThanOrEqual(cap);
+  });
+
+  it('a sub-CAP_LOOSEN_PX wobble at the bound does NOT restart — this is the ping-pong guard', () => {
+    let cap = 20;
+    const d = drive(() => cap);
+    d.pump();
+    expect(d.state().done).toBe(true);
+    const before = { fs: d.fs(), passes: d.state().passes };
+    // rise by strictly less than CAP_LOOSEN_PX, the renderer's own rounding wobble
+    cap = 20 + (CAP_LOOSEN_PX - 1);
+    d.pump();
+    expect(d.state().done).toBe(true);
+    expect(d.fs()).toBe(before.fs);
+    expect(d.state().passes).toBe(before.passes);        // no restart means no pass was spent
+  });
+
+  it('a rise of CAP_LOOSEN_PX or more DOES restart — real new room is taken, not ignored', () => {
+    let cap = 20;
+    const d = drive(() => cap);
+    d.pump();
+    const before = d.fs();
+    expect(before).toBe(20);                             // the font is sitting ON the cap
+    cap = 20 + CAP_LOOSEN_PX;                            // the bound genuinely loosened
+    d.pump();
+    expect(d.fs()).toBeGreaterThan(before);
+  });
+
+  it('a rise while the font is NOT on the cap changes nothing — the cap was never binding', () => {
+    // width, not height, is what settles this fit: the font sits well under the cap, so loosening
+    // the cap is not news. Keying on it here is what re-fit every frame before the guard existed.
+    // the ONLY case here that is width-limited on purpose: 800px / (100 cols * 0.5) settles at 16
+    // under a cap of 20, so the font is comfortably off the cap and loosening it is not news.
+    let cap = 20;
+    const d = drive(() => cap, 800);
+    d.pump();
+    const before = { fs: d.fs(), passes: d.state().passes };
+    expect(before.fs).toBeLessThan(cap);
+    cap = cap + CAP_LOOSEN_PX * 4;
+    d.pump();
+    expect(d.fs()).toBe(before.fs);
+    expect(d.state().passes).toBe(before.passes);
   });
 });
