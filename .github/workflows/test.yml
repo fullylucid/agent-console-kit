@@ -1,0 +1,60 @@
+# The kit had no CI at all until 2026-09-10 (hydra-hq task 099198): main unprotected, zero
+# workflows, and 161 tests that ran only when a human remembered to type `npm test` — while
+# hydra-hq's frontend pins this repo, so its code runs in HQ's console on Schyler's iPad.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # `npm ci`, never `npm install`. #13 fixed a clean checkout's install (.npmrc
+      # legacy-peer-deps, bisected to vitest 4's peer graph, plus the undeclared
+      # @testing-library/dom peer) — so `npm install` DOES work here now. `npm ci` is still the
+      # right CI verb: it does no resolution at all, so a runner's npm version cannot change what
+      # gets installed, and it fails loudly when the lockfile and package.json disagree instead of
+      # quietly reconciling them. Verified from this lockfile under npm 10.9.7 AND npm 11: 80
+      # packages, 161/161, both.
+      #
+      # COUPLED TO #13's DELETE-WHEN: that .npmrc says to delete it once a plain
+      # `rm -rf node_modules && npm install && npm test` succeeds without it. Delete the LOCKFILE
+      # for that check too and regenerate it after — installing from a lockfile would satisfy the
+      # test without proving resolution works, which is the thing being tested.
+      - name: Install from the lockfile
+        run: npm ci --no-audit --no-fund
+
+      # A step that installed nothing would reach here and fail at `tsc: not found`, which is loud.
+      # This is louder and earlier, and names the cause instead of a missing binary.
+      - name: Refuse to test an empty tree
+        run: |
+          test -d node_modules && [ "$(ls -A node_modules | wc -l)" -gt 0 ] \
+            || { echo "::error::node_modules is empty — the install reported success and did nothing"; exit 1; }
+
+      # tsc --noEmit && vitest run. The grep is the point: vitest exits 0 on some paths that
+      # collect no files, and a green check that ran zero tests is indistinguishable from a pass.
+      # This repo shipped a test that could not fail earlier the same day; the lesson is cheap to encode.
+      #
+      # STRIP SGR FIRST — learned by this guard failing its own first CI run. vitest colourises on
+      # the runner, so the summary line is literally `Tests \e[22m \e[1m\e[32m161 passed`, and a
+      # regex expecting digits after the spaces fires on a PERFECT run. My local control had fed the
+      # guard a hand-written clean string, which only proved the regex matched my idea of the output.
+      # Both branches are now checked against the real bytes from that failed run.
+      - name: Run the suite, and prove it ran
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+          sed -r 's/\x1b\[[0-9;]*[A-Za-z]//g' test-output.txt > test-output.plain
+          grep -Eq 'Tests +[1-9][0-9]* passed' test-output.plain \
+            || { echo "::error::the suite reported no passing tests — a green step that ran nothing"; exit 1; }
