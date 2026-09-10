@@ -23,11 +23,19 @@ export const MIRROR_FS_MAX = 64;
 export const FS_STEP = 0.25;
 /** Conservative default advance ratio (cell width ÷ font px) used before the first measurement. */
 export const CHAR_RATIO_DEFAULT = 0.62;
-/** The head's PTY is never driven below this many rows by the mirror's zoom — a standard terminal is 24.
- *  When a pane is so wide that fit-to-width would leave fewer rows than this, the zoom is bounded by HEIGHT
- *  instead (heightBoundFont) and a right-hand gap remains: the pane's aspect, not the fit, is the limit.
- *  (PR #7 review round 2: rows must follow the zoom so the whole TUI stays reachable, but a 100×10 head is
- *  unusable — this floor is the line between the two.) */
+/** Rows assumed when the pane cannot be measured (relayRows), and the row count the height bound is
+ *  computed FOR (HeadTerminal's `maxFs`) — a standard terminal is 24. So a pane wide enough that
+ *  fit-to-width would leave fewer rows than this is bounded by HEIGHT instead (heightBoundFont) and keeps a
+ *  right-hand gap: the pane's aspect, not the fit, is the limit.
+ *
+ *  NOT a floor on a MEASURED pane. It read "the head's PTY is never driven below this many rows by the
+ *  mirror's zoom … (PR #7 review round 2 … a 100×10 head is unusable — this floor is the line between the
+ *  two)" until #10 withdrew exactly that: below ~24 × cellPerFs × MIRROR_FS_MIN the font can shrink no
+ *  further, so asking for 24 anyway made the mirror TALLER than the pane it mirrors. The 100×10 worry was
+ *  real and now lives with the consumer — hydra-hq's relay clamps at RESIZE_MIN_ROWS = 10
+ *  (backend/hq_term.py) before it resize-windows the SHARED pane, which is also why the mirror can still
+ *  overflow a pane under ~48px. Whether one viewer's collapsed pane may reshape the head for every viewer
+ *  is Schyler's open question (hq 4e5569) — do not answer it by quietly reinstating the floor here. */
 export const MIN_RELAY_ROWS = 24;
 /** Upper bound on rows the relay is ever asked for (unchanged from before). */
 export const MAX_RELAY_ROWS = 160;

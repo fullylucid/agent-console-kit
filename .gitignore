@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 # ── This repo is PUBLIC and serves its own root over HTTP. Anything committed here
 # becomes a live URL, not just readable source. Internal documents live in the private
 # merritt-studio repo (docs/tenants/<this-repo>/), never here.

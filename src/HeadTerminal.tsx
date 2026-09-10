@@ -460,8 +460,10 @@ export default function HeadTerminal({
     };
     // FILL the host (rows) + drive the pane to TARGET_MIRROR_COLS. The head's alt-screen TUI draws exactly
     // pane-many rows, so we ask the relay to make the mirrored window TARGET_MIRROR_COLS wide and as tall as
-    // fits the keyboard-closed pane AT THE FONT ACTUALLY APPLIED (relayRows; floored at MIN_RELAY_ROWS, which
-    // the height-bounded zoom guarantees fit). Mirror and head agree → nothing clipped, nothing unreachable.
+    // fits the keyboard-closed pane AT THE FONT ACTUALLY APPLIED (relayRows: the rows that FIT, capped at
+    // MAX_RELAY_ROWS; MIN_RELAY_ROWS only when the geometry is unmeasurable — #10). Mirror and head agree →
+    // nothing clipped, nothing unreachable. Under ~48px the relay's own RESIZE_MIN_ROWS = 10 wins and a few
+    // rows of overflow remain: there, as on the width axis, the pane's aspect is the limit.
     // NOT recomputed while the keyboard is open (availH holds its last value). Converges in 1 POST (+ at most
     // one ±1-2 row rounding correction); cols are pinned to TARGET and never oscillate.
     const resizeMirror = () => {

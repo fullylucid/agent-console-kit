@@ -346,7 +346,7 @@ describe('createFitter — the apply→measure→correct loop', () => {
   });
 });
 
-describe('height bound + relay rows — the whole TUI stays on screen; the head never drops below MIN_RELAY_ROWS', () => {
+describe('height bound + relay rows — the whole TUI stays on screen, and the mirror never outgrows its pane', () => {
   const CPF = 1.2;   // renderer cell-height per font px (xterm ≈ 1.2)
   // the fitter as HeadTerminal wires it: width fit + height cap for MIN_RELAY_ROWS; rows from the applied font
   const fitPane = (availW: number, availH: number, ratio: number, dpr: number) => {
@@ -449,14 +449,14 @@ describe('height bound + relay rows — the whole TUI stays on screen; the head 
     expect(fs).toBeGreaterThan(31);
     expect(fs).toBeLessThanOrEqual(40);
   });
-  it('invariant over a geometry grid: mirror fits both axes; a right gap exists ONLY when the row floor binds', () => {
+  it('invariant over a geometry grid: mirror fits both axes; a right gap exists ONLY when the height bound binds', () => {
     for (const w of [380, 850, 1130, 1700, 1920, 2540, 3400]) for (const h of [500, 700, 900, 1200]) for (const dpr of [1, 2]) {
       const r = fitPane(w, h, 0.6, dpr);
       expect(r.painted, `overflow-x w=${w} h=${h}`).toBeLessThanOrEqual(w);
       expect(r.mirrorH, `overflow-y w=${w} h=${h}`).toBeLessThanOrEqual(h + 1e-9);
       expect(r.rows).toBeGreaterThanOrEqual(MIN_RELAY_ROWS);
       const widthFit = bucketOracle(w, 100, 0.6, dpr);
-      if (r.fs < widthFit) expect(r.rows, `gap without the floor binding w=${w} h=${h}`).toBe(MIN_RELAY_ROWS);
+      if (r.fs < widthFit) expect(r.rows, `gap without the height bound binding w=${w} h=${h}`).toBe(MIN_RELAY_ROWS);
     }
   });
 });
