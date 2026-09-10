@@ -367,13 +367,36 @@ describe('height bound + relay rows — the whole TUI stays on screen; the head 
     expect(heightBoundFont(0, CPF, 24)).toBe(MIRROR_FS_MAX);        // unknown → no bound
     expect(heightBoundFont(900, 0, 24)).toBe(MIRROR_FS_MAX);
   });
-  it('relayRows: rows that fit at the APPLIED font, floored and capped', () => {
+  it('relayRows: rows that fit at the APPLIED font, capped — and never more than fit', () => {
     expect(relayRows(900, CPF, 16)).toBe(46);
     expect(relayRows(900, CPF, 28.25)).toBe(26);
-    expect(relayRows(900, CPF, 56.5)).toBe(MIN_RELAY_ROWS);          // the zoom would leave 13 → floor 24
+    // WAS `toBe(MIN_RELAY_ROWS)` with the comment "the zoom would leave 13 → floor 24". That assertion
+    // pinned the defect: 24 rows at 56.5px is 1627px of mirror in a 900px pane. 13 is what fits.
+    expect(relayRows(900, CPF, 56.5)).toBe(13);
     expect(relayRows(2000, CPF, 6)).toBe(MAX_RELAY_ROWS);
-    expect(relayRows(0, CPF, 16)).toBe(MIN_RELAY_ROWS);
     expect(MIN_RELAY_ROWS).toBe(24);
+  });
+  it('MIN_RELAY_ROWS is a floor on IGNORANCE, not on a measurement', () => {
+    // Unmeasurable geometry (mid-layout, hidden host, zero-size) still needs a guess, and the old one is
+    // the safe one. What it must never do is override a real measurement.
+    expect(relayRows(0, CPF, 16)).toBe(MIN_RELAY_ROWS);
+    expect(relayRows(900, 0, 16)).toBe(MIN_RELAY_ROWS);
+    expect(relayRows(900, CPF, 0)).toBe(MIN_RELAY_ROWS);
+  });
+  it('a short pane is never asked for rows it cannot show — the mirror never outgrows its pane', () => {
+    // THE #7-SWEEP DEFECT (finding 1; hydra-hq e2bbeb → 4e5569). The old floor rested on "the zoom is
+    // height-bounded so the floor's rows fit", which holds only until heightBoundFont bottoms out at
+    // MIRROR_FS_MIN — i.e. below MIN_RELAY_ROWS × CPF × MIRROR_FS_MIN ≈ 115px, matching the reported
+    // "below roughly 120px the mirror renders TALLER than the pane it mirrors".
+    for (const availH of [40, 60, 90, 114, 116, 200, 400, 900]) {
+      const fs = heightBoundFont(availH, CPF, MIN_RELAY_ROWS);       // the cap the fitter would apply
+      const rows = relayRows(availH, CPF, fs);
+      expect(rows * CPF * fs).toBeLessThanOrEqual(availH);
+    }
+    // and concretely, at the pane height that used to break it:
+    const fs90 = heightBoundFont(90, CPF, MIN_RELAY_ROWS);
+    expect(fs90).toBe(MIRROR_FS_MIN);                                 // the font can shrink no further
+    expect(relayRows(90, CPF, fs90)).toBe(18);                        // 18 fit; the old code asked for 24
   });
   it('2-wide desktop (1700×900): width-bound zoom, ~26 rows, mirror fits the pane — nothing clipped', () => {
     const r = fitPane(1700, 900, 0.6, 1);
