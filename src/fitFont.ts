@@ -114,11 +114,26 @@ export const nextFit = (state: FitState, renderedW: number, availW: number, cols
 export const heightBoundFont = (availH: number, cellPerFs: number, rows: number) =>
   availH > 0 && cellPerFs > 0 && rows > 0 ? clamp(quantize(availH / (rows * cellPerFs))) : MIRROR_FS_MAX;
 
-/** Rows the relay should give the head so the mirror fills `availH` at the font ACTUALLY applied — floored at
- *  MIN_RELAY_ROWS (the zoom is height-bounded so the floor's rows fit) and capped at MAX_RELAY_ROWS. */
+/** Rows the relay should give the head so the mirror fills `availH` at the font ACTUALLY applied — capped at
+ *  MAX_RELAY_ROWS and NEVER more than actually fit.
+ *
+ *  THIS USED TO FLOOR AT MIN_RELAY_ROWS, on the grounds that "the zoom is height-bounded so the floor's rows
+ *  fit". That guarantee is real but CONDITIONAL, and the condition is not always met: the bound comes from
+ *  heightBoundFont, which clamps at MIRROR_FS_MIN, so once a pane is shorter than
+ *  MIN_RELAY_ROWS x cellPerFs x MIRROR_FS_MIN (~115px at the measured ~1.2 cell ratio) the font can no
+ *  longer shrink far enough to make 24 rows fit. Asking for 24 anyway made the MIRROR TALLER THAN THE PANE
+ *  IT MIRRORS — finding 1 of the #7 sweep (hydra-hq e2bbeb, then 4e5569), and the reported symptom
+ *  ("below roughly 120px") lands exactly on that crossover.
+ *
+ *  Fixed on its own because it is a bug under EITHER answer to the readability question Schyler ruled on:
+ *  a pane must never be asked for rows it cannot show, whichever font policy picks the font.
+ *
+ *  MIN_RELAY_ROWS remains the default when the geometry is UNMEASURABLE (mid-layout, hidden host, zero-size):
+ *  a guess is still needed there and the old one is the safe one — it is a floor on IGNORANCE, never on a
+ *  measurement. */
 export const relayRows = (availH: number, cellPerFs: number, fs: number) =>
   availH > 0 && cellPerFs > 0 && fs > 0
-    ? Math.max(MIN_RELAY_ROWS, Math.min(MAX_RELAY_ROWS, Math.floor(availH / (cellPerFs * fs))))
+    ? Math.max(1, Math.min(MAX_RELAY_ROWS, Math.floor(availH / (cellPerFs * fs))))
     : MIN_RELAY_ROWS;
 
 /** Width bucket the fit targets (floor to FIT_W_BUCKET; never above the real width). */
