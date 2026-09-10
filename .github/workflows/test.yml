@@ -45,9 +45,16 @@ jobs:
       # tsc --noEmit && vitest run. The grep is the point: vitest exits 0 on some paths that
       # collect no files, and a green check that ran zero tests is indistinguishable from a pass.
       # This repo shipped a test that could not fail earlier the same day; the lesson is cheap to encode.
+      #
+      # STRIP SGR FIRST — learned by this guard failing its own first CI run. vitest colourises on
+      # the runner, so the summary line is literally `Tests \e[22m \e[1m\e[32m161 passed`, and a
+      # regex expecting digits after the spaces fires on a PERFECT run. My local control had fed the
+      # guard a hand-written clean string, which only proved the regex matched my idea of the output.
+      # Both branches are now checked against the real bytes from that failed run.
       - name: Run the suite, and prove it ran
         run: |
           set -o pipefail
           npm test 2>&1 | tee test-output.txt
-          grep -Eq 'Tests +[1-9][0-9]* passed' test-output.txt \
+          sed -r 's/\x1b\[[0-9;]*[A-Za-z]//g' test-output.txt > test-output.plain
+          grep -Eq 'Tests +[1-9][0-9]* passed' test-output.plain \
             || { echo "::error::the suite reported no passing tests — a green step that ran nothing"; exit 1; }
