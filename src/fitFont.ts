@@ -52,12 +52,31 @@ export const MIRROR_FS_READABLE = 7;
 /** Upper bound on the columns the mirror will ask the relay for. A floor bounds the FONT, not the
  *  COLUMNS: at MIRROR_FS_READABLE a full-width desktop pane (1450px) fills at 334 cols.
  *
- *  THE BASIS IS LINE LENGTH, NOT THE DEVICE — and the distinction is load-bearing, so it is stated
- *  rather than implied (merritt, gating, who measured both halves). This fleet's p95 source line is
- *  119 (kit TS) and 104 (hq Python), so ~200 covers p95 plus a gutter, keeps headroom for the long
- *  tail and side-by-side diffs, and stops short of the width where measure collapses. Heads do NOT
- *  cap themselves: measured across six live heads, every one renders its longest line to exactly its
- *  pane width (100→100, 120→120), so a head asked for 334 will give 334-character measure.
+ *  THE BASIS IS PROSE DENSITY, NOT CODE FIT — and I had that backwards when I gave it, so it is
+ *  restated from the measurement rather than from the p95 figure I first quoted (merritt, gating).
+ *  Corpus: 74,377 lines across the kit, hq backend + scripts, and the studio's engineer + toolbox.
+ *
+ *      p50 49 · p90 98 · p95 101 · p99 120 · p99.9 202 · max 1161
+ *
+ *      window   lines that wrap   rows wasted to wrapping
+ *         120        1.10%                 1.279%
+ *         140        0.45%                 0.586%
+ *         160        0.24%                 0.352%
+ *         200        0.12%                 0.192%
+ *         334        0.04%                 0.070%
+ *
+ *  So CODE FIT DOES NOT CHOOSE THIS NUMBER: p99 is 120, ~140 already makes wrapping rare, and going
+ *  160 → 200 buys 0.16 percentage points of wasted rows for 25% more cells. On that evidence alone
+ *  the answer is 160, and I argued for it. What overrules it is that PROSE REFLOWS: a Claude Code
+ *  pane is mostly prose, so 200 shows ~20% more of it per screen than 160 — and content density is
+ *  precisely what Schyler asked for ("seeing more of what the head is doing is the point"). A
+ *  measured 0.16pp does not outweigh his stated preference; an unmeasured perf hunch does not
+ *  either. EXPECTED DIRECTION OF TUNING: narrower, if it stutters on his device — not wider.
+ *
+ *  Heads do NOT cap themselves: measured across six live heads, every one renders its longest line
+ *  to exactly its pane width (100→100, 120→120), so a head asked for 334 will give 334-character
+ *  measure. (The earlier "side-by-side diffs" clause was mine and I cannot substantiate it —
+ *  nothing in the head's render consumes two file widths. Dropped rather than left standing.)
  *
  *  IT DOES NOT PROTECT THE A12X, and must not be read as if it does. Compositing cost scales with
  *  cols × rows:
@@ -69,8 +88,14 @@ export const MIRROR_FS_READABLE = 7;
  *  200 still permits 6.8× today's cell count. Only a measurement on his own device settles that,
  *  which is what the runtime tune below exists to make cheap.
  *
- *  Tighter than the consumer's own ceiling (400) on purpose — the p95 basis is the sentence that
- *  earns the difference; a looser value would be dead code. */
+ *  Tighter than the consumer's own ceiling (400) on purpose — the density basis above is the sentence
+ *  that earns the difference; a looser value would be dead code.
+ *
+ *  AND IT IS NOT A CEILING ON COST: the runtime tune below is bounded to [20, 400] cols and
+ *  [MIRROR_FS_MIN, MIRROR_FS_MAX] px, so a viewer who sets `?mirrorFs=4` reaches 200 × 160 = 32,000
+ *  cells — the uncapped figure this constant exists to avoid. That is the tune doing its job (its
+ *  whole purpose is trying values we cannot measure for him), not a hole; it is written down so
+ *  nobody reads the cap as a bound on what the mirror can ever ask for. */
 export const MAX_MIRROR_COLS = 200;
 
 /** A viewer-supplied override for the two numbers only Schyler's own device can settle. Both are
