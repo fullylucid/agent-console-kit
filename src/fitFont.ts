@@ -50,14 +50,41 @@ export const CHAR_RATIO_DEFAULT = 0.62;
 export const MIRROR_FS_READABLE = 7;
 
 /** Upper bound on the columns the mirror will ask the relay for. A floor bounds the FONT, not the
- *  COLUMNS: at MIRROR_FS_READABLE a full-width desktop pane (1450px) fills at 334 cols, and a
- *  334-column head is not "more of what the head is doing" — it is a TUI stretched past usability,
- *  reflowed that way for EVERY viewer of that head, not just the pane that asked.
+ *  COLUMNS: at MIRROR_FS_READABLE a full-width desktop pane (1450px) fills at 334 cols.
  *
- *  Measured 2026-09-10 across real pane sizes: half-width desktop 161, iPad portrait 170, 3-wide
- *  column 105, full-width desktop 334. 200 admits every pane a person actually reads a TUI in and
- *  stops the ultrawide case. */
+ *  THE BASIS IS LINE LENGTH, NOT THE DEVICE — and the distinction is load-bearing, so it is stated
+ *  rather than implied (merritt, gating, who measured both halves). This fleet's p95 source line is
+ *  119 (kit TS) and 104 (hq Python), so ~200 covers p95 plus a gutter, keeps headroom for the long
+ *  tail and side-by-side diffs, and stops short of the width where measure collapses. Heads do NOT
+ *  cap themselves: measured across six live heads, every one renders its longest line to exactly its
+ *  pane width (100→100, 120→120), so a head asked for 334 will give 334-character measure.
+ *
+ *  IT DOES NOT PROTECT THE A12X, and must not be read as if it does. Compositing cost scales with
+ *  cols × rows:
+ *      today         100×28  =  2,800
+ *      his example   161×45  =  7,245   2.6×
+ *      this cap      200×95  = 19,000   6.8×
+ *      uncapped      334×95  = 31,730  11.3×
+ *      relay ceiling 400×160 = 64,000  22.9×   (hq_term.py RESIZE_MAX_COLS/ROWS)
+ *  200 still permits 6.8× today's cell count. Only a measurement on his own device settles that,
+ *  which is what the runtime tune below exists to make cheap.
+ *
+ *  Tighter than the consumer's own ceiling (400) on purpose — the p95 basis is the sentence that
+ *  earns the difference; a looser value would be dead code. */
 export const MAX_MIRROR_COLS = 200;
+
+/** A viewer-supplied override for the two numbers only Schyler's own device can settle. Both are
+ *  currently spelled "a PR, a review and a deploy, per opinion"; this makes trying a pair cost one
+ *  reload instead (merritt's proposal, and the honest answer to "our rig is the wrong engine" —
+ *  better than promising to test later on hardware no agent here has).
+ *
+ *  Validated, never trusted: a non-finite or out-of-range value falls back to the constant, because
+ *  a typo in a query string must not be able to brick the console. Bounds are the ones the consumer
+ *  would clamp to anyway. */
+export interface MirrorTune { fs?: number; maxCols?: number }
+
+const tuned = (v: number | undefined, lo: number, hi: number, fallback: number) =>
+  typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : fallback;
 /** Rows assumed when the pane cannot be measured (relayRows), and the row count the height bound is
  *  computed FOR (HeadTerminal's `maxFs`) — a standard terminal is 24. So a pane wide enough that
  *  fit-to-width would leave fewer rows than this is bounded by HEIGHT instead (heightBoundFont) and keeps a
@@ -195,10 +222,13 @@ export const relayRows = (availH: number, cellPerFs: number, fs: number) =>
  *  a guess is exactly what mid-layout numbers are. */
 export const mirrorGeometry = (
   availW: number, availH: number, cellPerFs: number, ratio = CHAR_RATIO_DEFAULT,
+  tune: MirrorTune = {},
 ): { fs: number; cols: number; rows: number } | null => {
   if (!(availW > 0) || !(availH > 0) || !(cellPerFs > 0) || !(ratio > 0)) return null;
-  const fs = clamp(Math.max(MIRROR_FS_READABLE, MIRROR_FS_MIN));
-  const cols = Math.max(20, Math.min(MAX_MIRROR_COLS, Math.floor(availW / (ratio * fs))));
+  const floor = tuned(tune.fs, MIRROR_FS_MIN, MIRROR_FS_MAX, MIRROR_FS_READABLE);
+  const capCols = tuned(tune.maxCols, 20, 400, MAX_MIRROR_COLS);
+  const fs = clamp(Math.max(floor, MIRROR_FS_MIN));
+  const cols = Math.max(20, Math.min(capCols, Math.floor(availW / (ratio * fs))));
   return { fs, cols, rows: relayRows(availH, cellPerFs, fs) };
 };
 

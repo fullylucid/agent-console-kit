@@ -386,6 +386,29 @@ describe('mirrorGeometry — Schyler Q1wider: more lines AND no empty strip', ()
     expect(MIRROR_FS_READABLE).toBeGreaterThanOrEqual(MIRROR_FS_MIN);
   });
 
+  it('a viewer tune overrides both numbers — the rung only his device can settle, retired cheaply', () => {
+    const g = mirrorGeometry(700, 379, CPF, CHAR_RATIO_DEFAULT, { fs: 10, maxCols: 80 })!;
+    expect(g.fs).toBe(10);
+    expect(g.cols).toBe(80);
+  });
+
+  it('a bad tune falls back to the constants rather than bricking the console', () => {
+    // A typo in a query string must not be able to break the terminal for that viewer.
+    for (const bad of [{ fs: NaN }, { fs: 0 }, { fs: 999 }, { fs: -7 }] as const) {
+      expect(mirrorGeometry(700, 379, CPF, CHAR_RATIO_DEFAULT, bad)!.fs).toBe(MIRROR_FS_READABLE);
+    }
+    for (const bad of [{ maxCols: NaN }, { maxCols: 3 }, { maxCols: 9999 }] as const) {
+      expect(mirrorGeometry(1450, 800, CPF, CHAR_RATIO_DEFAULT, bad)!.cols).toBe(MAX_MIRROR_COLS);
+    }
+  });
+
+  it('the tune cannot ask for more than the consumer would accept', () => {
+    // The relay clamps cols to [20,400]; a tune outside that is refused here rather than silently
+    // reshaped one layer down, where the mismatch becomes a re-POST loop.
+    expect(mirrorGeometry(9000, 800, CPF, CHAR_RATIO_DEFAULT, { maxCols: 400 })!.cols).toBe(400);
+    expect(mirrorGeometry(9000, 800, CPF, CHAR_RATIO_DEFAULT, { maxCols: 401 })!.cols).toBe(MAX_MIRROR_COLS);
+  });
+
   it('refuses to derive geometry from unmeasurable input', () => {
     // A POST built from a mid-layout number is a resize derived from a guess.
     expect(mirrorGeometry(0, 379, CPF)).toBeNull();

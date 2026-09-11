@@ -3,6 +3,7 @@ import { Terminal } from 'xterm';
 import 'xterm/css/xterm.css';
 import { C } from './render/tokens';
 import { CHAR_RATIO_DEFAULT, MIN_RELAY_ROWS, MIRROR_FS_READABLE, createFitter, heightBoundFont, mirrorGeometry, relayRows } from './fitFont';
+import type { MirrorTune } from './fitFont';
 
 // HeadTerminal — the reusable raw-TUI engine (extracted from TerminalPanel so the console head-view
 // and the terminal drawer share ONE implementation, no copy-paste). It owns the whole lifecycle for a
@@ -177,7 +178,11 @@ export default function HeadTerminal({
   const openingRef = useRef(false);                    // guard against a double-open race during debounce
   const mountedRef = useRef(true);                     // false after unmount → a resolving open self-closes
   const activeRef = useRef(active);                    // current active, readable inside an async open
-  const lastRowsRef = useRef<number | null>(null);     // last row-count we asked the relay to mirror at
+  // The (cols, rows) PAIR we last asked the relay for — not just rows. Rows alone was enough while
+  // cols were pinned to a constant; with cols derived it is not, and the relay CLAMPS what we ask
+  // (RESIZE_MIN/MAX_COLS 20/400, ROWS 10/160). Comparing against term.cols alone means a clamped
+  // request never matches what we asked, so we re-POST it every settle, forever. Dedup on the ASK.
+  const lastAskRef = useRef<{ cols: number; rows: number } | null>(null);
 
   // ---- lifecycle: open while active (debounced), close on swipe-away / unmount -------------------
   const teardownXterm = () => {
@@ -318,7 +323,7 @@ export default function HeadTerminal({
   // ---- xterm: raw-byte render keyed on the live sid ----------------------------------------------
   useEffect(() => {
     if (!sess || !hostRef.current) return;
-    lastRowsRef.current = null;          // new session → recompute the mirror row-count from scratch
+    lastAskRef.current = null;           // new session → recompute the mirror geometry from scratch
     setEcho([]);                         // stale pending-echo from a prior session must not carry over
     // A pane MIRROR is read-only: the head's real cursor is already baked into the captured bytes, so
     // xterm's OWN cursor block is a spurious artifact that lands at a stale position (Schyler: "cursor box
@@ -328,7 +333,27 @@ export default function HeadTerminal({
     // A blank SHELL gets a fixed, READABLE (chat-sized) font; cols are driven to fit the width (resizeShellOnce)
     // so it wraps like a normal terminal instead of cramming 100+ mirror columns into ~5px. A mirror keeps the
     // small fit-to-width font (it must show a head's full 100-120-col TUI without h-scroll).
-    const SHELL_FS = 15;
+    // The viewer's own override for the two numbers only a real device can settle (?mirrorFs=7&mirrorCols=200,
+// or localStorage hq.mirrorFs / hq.mirrorCols so it survives a reload). Read once per mount and passed
+// into mirrorGeometry, which validates and falls back — so a typo costs nothing. Storage access is
+// wrapped because a private window or blocked site-data throws on the ACCESSOR itself, not on the value.
+const readMirrorTune = (): MirrorTune => {
+  const num = (v: string | null | undefined) => {
+    const n = v == null ? NaN : Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  try {
+    const q = new URLSearchParams(window.location.search);
+    return {
+      fs: num(q.get('mirrorFs')) ?? num(window.localStorage.getItem('hq.mirrorFs')),
+      maxCols: num(q.get('mirrorCols')) ?? num(window.localStorage.getItem('hq.mirrorCols')),
+    };
+  } catch {
+    return {};
+  }
+};
+
+const SHELL_FS = 15;
     const term = new Terminal({
       convertEol: false, cursorBlink: !mirror, disableStdin: !interactive, scrollback: 5000, fontSize: mirror ? 12 : SHELL_FS,
       fontFamily: "'SFMono-Regular',ui-monospace,Consolas,monospace",
@@ -402,6 +427,7 @@ export default function HeadTerminal({
       if (h > 0) availHMemo = h;
       return availHMemo;
     };
+    const tune = readMirrorTune();
     const fitter = createFitter({
       availW: () => (hostRef.current ? hostRef.current.clientWidth - 12 : 0),   // host has 6px padding on each side
       cols: () => (sized || colsFallback ? term.cols : 0),
@@ -431,7 +457,7 @@ export default function HeadTerminal({
         // the fit loop would drive the font down to MIRROR_FS_MIN and the columns up with it. The
         // floor is what stops it, which is also why this cannot oscillate — the font settles AT a
         // constant rather than in a POST → pane-grow → re-measure cycle.
-        applyFs(MIRROR_FS_READABLE);
+        applyFs(tune.fs && tune.fs >= 4 && tune.fs <= 64 ? tune.fs : MIRROR_FS_READABLE);
         scheduleRows();
         return;
       }
@@ -494,11 +520,15 @@ export default function HeadTerminal({
       const appliedFs = (term.options.fontSize as number) || 0;
       if (!(cpf > 0) || avail <= 0 || appliedFs <= 0) return;   // mid-layout / not painted → skip this measurement
       const host = hostRef.current;
-      const g = host ? mirrorGeometry(host.clientWidth - 12, avail, cpf, paintedRatio()) : null;
+      const g = host ? mirrorGeometry(host.clientWidth - 12, avail, cpf, paintedRatio(), tune) : null;
       if (!g) return;                                  // unmeasurable → never POST a resize built on a guess
       const { cols: wantCols, rows: want } = g;
-      if (term.cols === wantCols && (want === term.rows || want === lastRowsRef.current)) return;  // converged
-      lastRowsRef.current = want;
+      const last = lastAskRef.current;
+      // Already AT the asked geometry, OR we already asked for exactly this pair and the relay
+      // answered with whatever it answered — either way there is nothing new to say.
+      if (term.cols === wantCols && want === term.rows) return;                       // converged
+      if (last && last.cols === wantCols && last.rows === want) return;               // already asked
+      lastAskRef.current = { cols: wantCols, rows: want };
       fetch(`${apiBase}/${encodeURIComponent(sid)}/resize`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cols: wantCols, rows: want }),   // fill the pane: both axes follow the floor
