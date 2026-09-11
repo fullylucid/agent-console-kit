@@ -94,15 +94,46 @@ jobs:
           TAG="v$VERSION"
 
           if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null 2>&1; then
-            # Released already. The question is whether anything RELEASABLE has landed since.
-            # feat/fix is the discriminator because it is this repo's actual convention (checked
-            # across every commit since v0.11.2) and it is what semver means by a release. A
-            # docs/chore/ci/test merge is deliberately not one — kit#17 and #18 were docs-only and
-            # should not have cut a version.
-            N=$(git log --format=%s "$TAG..HEAD" | grep -cE '^(feat|fix)(\(|!|:)' || true)
-            if [ "${N:-0}" -gt 0 ]; then
-              echo "::error::$N feat/fix commit(s) landed since $TAG and package.json still says $VERSION — so no tag will be cut, and without this line nothing would have said so. Bump the version to release them:"
-              git log --format='  %h %s' "$TAG..HEAD" | grep -E '^  [0-9a-f]+ (feat|fix)(\(|!|:)' || true
+            # Released already. The question is whether anything RELEASABLE has landed since —
+            # and that takes BOTH signals, per commit. Neither alone is right:
+            #
+            #   subject only (feat|fix)  false-positives on a fix that ships nothing. MEASURED:
+            #                            b1ec829 `fix(deps)` touched .npmrc + package.json and NO
+            #                            src/; `files: ["src"]` means no consumer could observe it,
+            #                            so it would have held main red until someone cut an empty
+            #                            release. (merritt, gating — the hole was his own commit.)
+            #   src/ only                false-positives on a docstring. Five commits in this
+            #                            repo's last fourteen touch src/ and are comment-only
+            #                            (#12 #17 #18 #20 #21); #17 and #18 correctly cut nothing.
+            #
+            # So: a releasable commit is one whose SUBJECT says feat|fix AND whose TREE touches
+            # src/. Per commit, not across the window — a `fix(deps)` sitting beside an unrelated
+            # docs-that-touched-src/ would satisfy a global AND and fire wrongly (exactly the
+            # v0.11.3..v0.11.4 window: b1ec829 + 1ca8b68).
+            #
+            # Replayed against real history with the conjunction in place — and NOTE THAT NO PR CAN
+            # RUN THIS JOB (it is push-to-main only, by design), so a change here ships verified by
+            # replay or not at all. To re-run it, extract the loop below and drive it over windows
+            # with a known answer:
+            #   v0.11.1..cb8330b  old 2 fires | new 2 fires   gaps 1+2, still caught
+            #   v0.11.3..0efe003  old 2 fires | new 1 fires    gap 3, still caught
+            #   v0.11.3..eca115b  old 2 fires | new 1 fires    docs push while gap 3 stood: still loud
+            #   v0.11.3..b1ec829  old 1 FIRES | new 0 fires    <- the false positive, gone
+            #   v0.11.4..main     old 0       | new 0          nothing releasable today
+            # All three real gaps still found. And in the eca115b window the message now names ONE
+            # commit instead of two, because `fix(deps)` is no longer counted as something to release.
+            OVERDUE=$(git log --format='%H %s' "$TAG..HEAD" | while read -r sha subject; do
+              case "$subject" in
+                feat\(*|feat:*|feat!*|fix\(*|fix:*|fix!*) ;;
+                *) continue ;;
+              esac
+              if git diff-tree --no-commit-id --name-only -r "$sha" -- src/ | grep -q .; then
+                printf '  %s %s\n' "$(git rev-parse --short "$sha")" "$subject"
+              fi
+            done)
+            if [ -n "$OVERDUE" ]; then
+              echo "::error::feat/fix commits touching src/ landed since $TAG and package.json still says $VERSION — so no tag will be cut, and without this line nothing would have said so. Bump the version to release them:"
+              printf '%s\n' "$OVERDUE"
               exit 1
             fi
             echo "$TAG is current and nothing releasable has landed since it."
