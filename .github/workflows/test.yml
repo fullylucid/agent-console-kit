@@ -58,3 +58,60 @@ jobs:
           sed -r 's/\x1b\[[0-9;]*[A-Za-z]//g' test-output.txt > test-output.plain
           grep -Eq 'Tests +[1-9][0-9]* passed' test-output.plain \
             || { echo "::error::the suite reported no passing tests — a green step that ran nothing"; exit 1; }
+
+  # ---------------------------------------------------------------------------------------------
+  # THE RELEASE RUNG. hydra-hq task e3a5de: this repo shipped merged-and-unreachable three releases
+  # running (77a9dc, then kit#10, then kit#16 — a ruling Schyler personally answered a form to give
+  # us, sitting untagged). The cause was NOT sloppiness: the version once rode WITH the feature in
+  # one commit (5892e1f, v0.11.0), and splitting it out was correct, because five concurrent PRs
+  # would all conflict on that one line. What the split did was trade a LOUD failure (a merge
+  # conflict nobody can ignore) for a SILENT one (no tag, no complaint, every dashboard green).
+  #
+  # This restores the loudness. It does BOTH halves, and the second is the one that matters:
+  #   * cut the tag when package.json names a version that has none;
+  #   * FAIL when feat/fix commits have piled up since the last tag and nobody bumped — without
+  #     which a feature merged with no bump produces no tag AND no complaint, i.e. today's silence
+  #     with extra YAML. (merritt, gating: "or it's another instrument that can only pass".)
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Declared even though this repo's default_workflow_permissions is already `write` (measured):
+    # an account-level default is someone else's setting to flip, and a job that silently depends
+    # on it fails at the push, after the merge, where nobody is looking.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # tags + full history: the check reads `<tag>..HEAD`
+
+      - name: Tag this version, or say why the release is overdue
+        run: |
+          set -eu
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null 2>&1; then
+            # Released already. The question is whether anything RELEASABLE has landed since.
+            # feat/fix is the discriminator because it is this repo's actual convention (checked
+            # across every commit since v0.11.2) and it is what semver means by a release. A
+            # docs/chore/ci/test merge is deliberately not one — kit#17 and #18 were docs-only and
+            # should not have cut a version.
+            N=$(git log --format=%s "$TAG..HEAD" | grep -cE '^(feat|fix)(\(|!|:)' || true)
+            if [ "${N:-0}" -gt 0 ]; then
+              echo "::error::$N feat/fix commit(s) landed since $TAG and package.json still says $VERSION — so no tag will be cut, and without this line nothing would have said so. Bump the version to release them:"
+              git log --format='  %h %s' "$TAG..HEAD" | grep -E '^  [0-9a-f]+ (feat|fix)(\(|!|:)' || true
+              exit 1
+            fi
+            echo "$TAG is current and nothing releasable has landed since it."
+            exit 0
+          fi
+
+          echo "package.json says $VERSION and no $TAG exists — cutting it."
+          git config user.name  "hydra-bot-fleet[bot]"
+          git config user.email "295638539+hydra-bot-fleet[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG — tagged on merge to main by the release rung (hydra-hq e3a5de)"
+          git push origin "$TAG"
+          echo "tagged $TAG at $(git rev-parse --short HEAD)"
