@@ -37,7 +37,13 @@ export const CHAR_RATIO_DEFAULT = 0.62;
  *
  *  RATIFIED 2026-09-10 17:48 — and this paragraph used to say the opposite, so the old wording is
  *  kept rather than swapped: it read "THE VALUE IS DERIVED, NOT CHOSEN … nobody picked 7 for its own
- *  sake, and it should be argued rather than inherited." True when written (7 is reproduced from his
+ *  sake, and it should be argued rather than inherited." That sentence was HQ's, written into #16;
+ *  the argument it encodes was merritt's, from the gating thread. Naming both matters here because
+ *  #20's own commit message on main claims the sentence for merritt and is wrong — the amend that
+ *  fixed it lost a race with an armed auto-merge, so the record in git is the pre-amend one and this
+ *  file is the correction. (Authorship in this fleet is recoverable: `git log -S "<phrase>"`, or the
+ *  `Head:` trailer once every repo has the hook — the kit was the one repo missing it until
+ *  2026-09-10.) True when written (7 is reproduced from his
  *  own worked example, "about 164×45" on a half-width pane, landing here at 161×45) and false forty
  *  minutes later. He answered ask_4993e9240e81 — `asis — Leave it — 7px, up to 200 columns` —
  *  DECLINING 9px/160, 6px/240, and an explicit "it stutters, back it off", with the per-frame
