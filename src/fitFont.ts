@@ -73,10 +73,23 @@ export const MIRROR_FS_READABLE = 7;
  *  measured 0.16pp does not outweigh his stated preference; an unmeasured perf hunch does not
  *  either. EXPECTED DIRECTION OF TUNING: narrower, if it stutters on his device — not wider.
  *
- *  Heads do NOT cap themselves: measured across six live heads, every one renders its longest line
- *  to exactly its pane width (100→100, 120→120), so a head asked for 334 will give 334-character
- *  measure. (The earlier "side-by-side diffs" clause was mine and I cannot substantiate it —
- *  nothing in the head's render consumes two file widths. Dropped rather than left standing.)
+ *  Heads do NOT cap themselves — and here is exactly which half of that is OBSERVED and which is
+ *  EXTRAPOLATED, because I first wrote it as one claim and it is two (hq caught it):
+ *    OBSERVED, up to 120 cols. Across six live heads every one renders its longest line to exactly
+ *      its pane width (100→100, 120→120). That alone proves little — a full-width rule or box border
+ *      also equals the pane width — so hq classified lines as border vs prose across four 120-col
+ *      panes: prose maxima 118-120, and 10-53% of prose lines land within 5% of the full width. Prose
+ *      really does reflow to the terminal width, with no internal wrap below 120.
+ *    EXTRAPOLATED, above 120. Every pane on this box is 100 or 120, so nothing here exercises 200,
+ *      let alone 334. A head asked for 334 is EXPECTED to give 334-character measure; it has not been
+ *      seen doing it.
+ *    WHY THE GAP IS NOT CHEAPLY CLOSED, so the next person does not "measure" a cap that is not there:
+ *      capture-pane straight after a resize shows scrollback still hard-wrapped at the OLD width,
+ *      because the TUI re-renders only its current frame. A naive resize-and-capture at 200 therefore
+ *      reports a 120 ceiling and looks like evidence. It needs fresh prose rendered after the resize.
+ *      Schyler's own density form offers 160 and 240, so the 200+ half gets tested where it counts.
+ *  (The earlier "side-by-side diffs" clause was mine and I cannot substantiate it — nothing in the
+ *  head's render consumes two file widths. Dropped rather than left standing.)
  *
  *  IT DOES NOT PROTECT THE A12X, and must not be read as if it does. Compositing cost scales with
  *  cols × rows:
