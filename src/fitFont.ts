@@ -35,9 +35,16 @@ export const CHAR_RATIO_DEFAULT = 0.62;
  *  need reconciling. It is also why there is no oscillation: the font settles AT the floor rather
  *  than in a POST→grow→re-measure loop.
  *
- *  THE VALUE IS DERIVED, NOT CHOSEN. 7 comes from Schyler's own worked example — "about 164×45"
- *  on a half-width desktop pane — reproduced here at 161×45. Nobody picked 7 for its own sake, and
- *  it should be argued rather than inherited.
+ *  RATIFIED 2026-09-10 17:48 — and this paragraph used to say the opposite, so the old wording is
+ *  kept rather than swapped: it read "THE VALUE IS DERIVED, NOT CHOSEN … nobody picked 7 for its own
+ *  sake, and it should be argued rather than inherited." True when written (7 is reproduced from his
+ *  own worked example, "about 164×45" on a half-width pane, landing here at 161×45) and false forty
+ *  minutes later. He answered ask_4993e9240e81 — `asis — Leave it — 7px, up to 200 columns` —
+ *  DECLINING 9px/160, 6px/240, and an explicit "it stutters, back it off", with the per-frame
+ *  character counts in front of him (2,800 today · 7,200 asked for · 19,000 allowed · 31,700
+ *  uncapped). So do not narrow this on your own judgement: an instruction to argue a number the
+ *  owner has already picked from alternatives is an instruction to override a record.
+ *  His own fallback is on that card — if it stutters, he says so and we back it off.
  *
  *  IT IS A PERF KNOB AS WELL AS A READABILITY ONE. His primary device is a 2018 A12X iPad
  *  (USER.md); smaller text over more rows is more glyphs composited per frame, and main-thread
@@ -72,6 +79,12 @@ export const MIRROR_FS_READABLE = 7;
  *  precisely what Schyler asked for ("seeing more of what the head is doing is the point"). A
  *  measured 0.16pp does not outweigh his stated preference; an unmeasured perf hunch does not
  *  either. EXPECTED DIRECTION OF TUNING: narrower, if it stutters on his device — not wider.
+ *
+ *  AND HE THEN RATIFIED 200 ITSELF (ask_4993e9240e81, 2026-09-10 17:48: `asis — Leave it — 7px, up
+ *  to 200 columns`), choosing it over 160 and 240 with the per-frame character counts stated in
+ *  plain words. That settles the number without settling the basis: the density argument above is
+ *  still what earns 200 over 160 on the evidence, and "narrower if it stutters" is still the
+ *  direction — but it is now HIS fallback, offered and declined, not our reservation about his choice.
  *
  *  Heads do NOT cap themselves — and here is exactly which half of that is OBSERVED and which is
  *  EXTRAPOLATED, because I first wrote it as one claim and it is two (hq caught it):
