@@ -23,6 +23,41 @@ export const MIRROR_FS_MAX = 64;
 export const FS_STEP = 0.25;
 /** Conservative default advance ratio (cell width ÷ font px) used before the first measurement. */
 export const CHAR_RATIO_DEFAULT = 0.62;
+
+/** THE READABLE FLOOR for an interactive mirror — the smallest font we are willing to render, under
+ *  which geometry maximises rows. Schyler ruled it (form `tui-mirror-width`, option Q1wider,
+ *  2026-09-10): "Widen the head too — more lines AND no empty strip."
+ *
+ *  WHY A FLOOR AND NOT A TARGET (merritt, gating): once cols follow the font, WIDTH STOPS
+ *  CONSTRAINING THE FONT — any font fills the width at the right col count — so "maximise rows"
+ *  minimises the font until something stops it. The system drives to this value on its own; a
+ *  target would be a second authority over a number geometry already decides, and the two would
+ *  need reconciling. It is also why there is no oscillation: the font settles AT the floor rather
+ *  than in a POST→grow→re-measure loop.
+ *
+ *  THE VALUE IS DERIVED, NOT CHOSEN. 7 comes from Schyler's own worked example — "about 164×45"
+ *  on a half-width desktop pane — reproduced here at 161×45. Nobody picked 7 for its own sake, and
+ *  it should be argued rather than inherited.
+ *
+ *  IT IS A PERF KNOB AS WELL AS A READABILITY ONE. His primary device is a 2018 A12X iPad
+ *  (USER.md); smaller text over more rows is more glyphs composited per frame, and main-thread
+ *  cost invisible on our rigs is a real defect on his — the CRT-flicker freeze came from exactly
+ *  that. Lowering this number is not free.
+ *
+ *  RELATIONSHIP, written down so neither constant drifts into the other's job:
+ *  MIRROR_FS_READABLE >= MIRROR_FS_MIN. MIRROR_FS_MIN guards ABSURD GEOMETRY; this guards
+ *  UNREADABILITY. Different failure modes; one constant must not hold both. */
+export const MIRROR_FS_READABLE = 7;
+
+/** Upper bound on the columns the mirror will ask the relay for. A floor bounds the FONT, not the
+ *  COLUMNS: at MIRROR_FS_READABLE a full-width desktop pane (1450px) fills at 334 cols, and a
+ *  334-column head is not "more of what the head is doing" — it is a TUI stretched past usability,
+ *  reflowed that way for EVERY viewer of that head, not just the pane that asked.
+ *
+ *  Measured 2026-09-10 across real pane sizes: half-width desktop 161, iPad portrait 170, 3-wide
+ *  column 105, full-width desktop 334. 200 admits every pane a person actually reads a TUI in and
+ *  stops the ultrawide case. */
+export const MAX_MIRROR_COLS = 200;
 /** Rows assumed when the pane cannot be measured (relayRows), and the row count the height bound is
  *  computed FOR (HeadTerminal's `maxFs`) — a standard terminal is 24. So a pane wide enough that
  *  fit-to-width would leave fewer rows than this is bounded by HEIGHT instead (heightBoundFont) and keeps a
@@ -143,6 +178,29 @@ export const relayRows = (availH: number, cellPerFs: number, fs: number) =>
   availH > 0 && cellPerFs > 0 && fs > 0
     ? Math.max(1, Math.min(MAX_RELAY_ROWS, Math.floor(availH / (cellPerFs * fs))))
     : MIN_RELAY_ROWS;
+
+/** PURE. The geometry an INTERACTIVE mirror asks the relay for: the head's window sized so the pane
+ *  is filled at the readable floor — Schyler's Q1wider, "more lines AND no empty strip".
+ *
+ *  Both axes follow one font. `ratio` is the MEASURED advance where the caller has one (cell width
+ *  ÷ font px, read back from what xterm actually painted) and CHAR_RATIO_DEFAULT before the first
+ *  measurement — the same discipline fitFontSize follows, because a projected ratio under-reads the
+ *  true advance and would over-ask for columns.
+ *
+ *  Rows reuse relayRows so there is ONE definition of "rows that fit", including its refusal to ask
+ *  for more than the pane can show (#10). Columns are capped at MAX_MIRROR_COLS; the floor bounds
+ *  the font and nothing else would bound these.
+ *
+ *  Unmeasurable geometry returns null — the caller must not POST a resize derived from a guess, and
+ *  a guess is exactly what mid-layout numbers are. */
+export const mirrorGeometry = (
+  availW: number, availH: number, cellPerFs: number, ratio = CHAR_RATIO_DEFAULT,
+): { fs: number; cols: number; rows: number } | null => {
+  if (!(availW > 0) || !(availH > 0) || !(cellPerFs > 0) || !(ratio > 0)) return null;
+  const fs = clamp(Math.max(MIRROR_FS_READABLE, MIRROR_FS_MIN));
+  const cols = Math.max(20, Math.min(MAX_MIRROR_COLS, Math.floor(availW / (ratio * fs))));
+  return { fs, cols, rows: relayRows(availH, cellPerFs, fs) };
+};
 
 /** Width bucket the fit targets (floor to FIT_W_BUCKET; never above the real width). */
 export const bucketWidth = (availW: number) => Math.floor(availW / FIT_W_BUCKET) * FIT_W_BUCKET;

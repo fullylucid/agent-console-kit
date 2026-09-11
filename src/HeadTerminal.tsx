@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import 'xterm/css/xterm.css';
 import { C } from './render/tokens';
-import { CHAR_RATIO_DEFAULT, MIN_RELAY_ROWS, createFitter, heightBoundFont, relayRows } from './fitFont';
+import { CHAR_RATIO_DEFAULT, MIN_RELAY_ROWS, MIRROR_FS_READABLE, createFitter, heightBoundFont, mirrorGeometry, relayRows } from './fitFont';
 
 // HeadTerminal — the reusable raw-TUI engine (extracted from TerminalPanel so the console head-view
 // and the terminal drawer share ONE implementation, no copy-paste). It owns the whole lifecycle for a
@@ -140,11 +140,6 @@ const echoGlyphsOf = (out: string): string | null => {
 // so this only governs the session record, not capture cost.
 const KEEPALIVE_MS = 600;
 
-// Drive the MIRRORED pane to this many COLUMNS (decoupled from the 120-col desktop clients via
-// window-size manual). Fewer cols → the fit-to-width font is BIGGER on a phone (100 ≈ ~6px vs 120 ≈ ~5px)
-// with still NO horizontal scroll. Dial DOWN (80/70) for bigger text. Restored to window-size latest →
-// back to the desktop width on disconnect (relay).
-const TARGET_MIRROR_COLS = 100;
 // Fit-to-width arithmetic lives in ./fitFont (pure, unit-tested): fitFontSize projects a font from a
 // cell-advance ratio; nextFit corrects it against the width xterm ACTUALLY painted. The measured ratio is
 // shared with the resize projection (pre-computes rows for TARGET cols).
@@ -418,9 +413,29 @@ export default function HeadTerminal({
       // a read-only mirror keeps the head's rows, so ALL of them must fit.
       maxFs: () => heightBoundFont(availH(), cellPerFs(), interactive ? MIN_RELAY_ROWS : term.rows),
     });
+    // The MEASURED advance (cell width ÷ font px) from what xterm actually painted, falling back to
+    // the projection before the first paint. mirrorGeometry needs it for columns, and a projected
+    // ratio under-reads the true advance — which would over-ask.
+    const paintedRatio = () => {
+      const el = hostRef.current?.querySelector('.xterm-screen');
+      const w = el ? el.getBoundingClientRect().width : 0;
+      const fs = (term.options.fontSize as number) || 0;
+      return w > 0 && term.cols > 0 && fs > 0 ? w / (term.cols * fs) : CHAR_RATIO_DEFAULT;
+    };
     const fitFont = () => {
       if (!mirror) { applyFs(SHELL_FS); return; }      // shell: fixed readable font; cols are driven to fit, not font
-      fitter.fit();
+      if (interactive) {
+        // Q1wider (Schyler, 2026-09-10): the head's window fills the pane — cols AND rows follow one
+        // font, and that font is the readable FLOOR. There is nothing left for the width fitter to
+        // maximise: once cols follow the font, any font fills the width at the right col count, so
+        // the fit loop would drive the font down to MIRROR_FS_MIN and the columns up with it. The
+        // floor is what stops it, which is also why this cannot oscillate — the font settles AT a
+        // constant rather than in a POST → pane-grow → re-measure cycle.
+        applyFs(MIRROR_FS_READABLE);
+        scheduleRows();
+        return;
+      }
+      fitter.fit();                                    // read-only mirror: keep the head's rows, zoom to width
     };
     // SHELL sizing (one-shot): drive the blank shell's pane to as many cols as fit the width at SHELL_FS, and
     // enough rows to fill the host — so it reads like a normal terminal (wraps, no h-scroll) at a readable font,
@@ -458,14 +473,17 @@ export default function HeadTerminal({
       const overflow = Math.max(0, block.offsetHeight - root.clientHeight);
       block.style.transform = overflow > 0 ? `translateY(${-overflow}px)` : 'none';
     };
-    // FILL the host (rows) + drive the pane to TARGET_MIRROR_COLS. The head's alt-screen TUI draws exactly
-    // pane-many rows, so we ask the relay to make the mirrored window TARGET_MIRROR_COLS wide and as tall as
-    // fits the keyboard-closed pane AT THE FONT ACTUALLY APPLIED (relayRows: the rows that FIT, capped at
-    // MAX_RELAY_ROWS; MIN_RELAY_ROWS only when the geometry is unmeasurable — #10). Mirror and head agree →
-    // nothing clipped, nothing unreachable. Under ~48px the relay's own RESIZE_MIN_ROWS = 10 wins and a few
-    // rows of overflow remain: there, as on the width axis, the pane's aspect is the limit.
-    // NOT recomputed while the keyboard is open (availH holds its last value). Converges in 1 POST (+ at most
-    // one ±1-2 row rounding correction); cols are pinned to TARGET and never oscillate.
+    // FILL THE PANE. The head's alt-screen TUI draws exactly pane-many rows and cols, so we ask the
+    // relay to make the mirrored window whatever fills this pane at the readable floor — both axes
+    // from one font (mirrorGeometry). Mirror and head agree, so nothing is clipped and nothing is
+    // unreachable, and no strip of the pane is left blank.
+    //
+    // This replaced a pinned 100 columns (Schyler, form tui-mirror-width option Q1wider, 2026-09-10:
+    // "Widen the head too — more lines AND no empty strip"). NOTE WHAT IT COSTS, because it is not
+    // this pane's business alone: the head's own window is resized, so its TUI reflows for EVERY
+    // viewer, not just the pane that asked. That is what he blessed; it is not a side effect.
+    // NOT recomputed while the keyboard is open (availH holds its last value). Converges in 1 POST
+    // (+ at most one rounding correction).
     const resizeMirror = () => {
       if (kind !== 'pane' || !interactive || !sized) return;   // wait for real pane cols (not xterm's 80)
       const sid = sidRef.current;
@@ -475,13 +493,15 @@ export default function HeadTerminal({
       const cpf = cellPerFs(); const avail = availH();
       const appliedFs = (term.options.fontSize as number) || 0;
       if (!(cpf > 0) || avail <= 0 || appliedFs <= 0) return;   // mid-layout / not painted → skip this measurement
-      const want = relayRows(avail, cpf, appliedFs);
-      const atTarget = term.cols === TARGET_MIRROR_COLS;
-      if (atTarget && (want === term.rows || want === lastRowsRef.current)) return;   // converged / already asked
+      const host = hostRef.current;
+      const g = host ? mirrorGeometry(host.clientWidth - 12, avail, cpf, paintedRatio()) : null;
+      if (!g) return;                                  // unmeasurable → never POST a resize built on a guess
+      const { cols: wantCols, rows: want } = g;
+      if (term.cols === wantCols && (want === term.rows || want === lastRowsRef.current)) return;  // converged
       lastRowsRef.current = want;
       fetch(`${apiBase}/${encodeURIComponent(sid)}/resize`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cols: TARGET_MIRROR_COLS, rows: want }),   // drive cols to the target + filled rows
+        body: JSON.stringify({ cols: wantCols, rows: want }),   // fill the pane: both axes follow the floor
       }).catch(() => {});
     };
     // DEBOUNCE the row-resize: measure once after layout SETTLES (300ms), not on every paint/relayout —

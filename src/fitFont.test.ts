@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BLANK_FRAMES_MAX, CAP_LOOSEN_PX, CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FIT_W_BUCKET, FS_STEP, MAX_RELAY_ROWS, MIN_RELAY_ROWS, MIRROR_FS_MAX, MIRROR_FS_MIN, bucketWidth, createFitter, fitFontSize, heightBoundFont, nextFit, relayRows, type FitState } from './fitFont';
+import { MAX_MIRROR_COLS, MIRROR_FS_READABLE, mirrorGeometry, BLANK_FRAMES_MAX, CAP_LOOSEN_PX, CHAR_RATIO_DEFAULT, FIT_MAX_PASSES, FIT_W_BUCKET, FS_STEP, MAX_RELAY_ROWS, MIN_RELAY_ROWS, MIRROR_FS_MAX, MIRROR_FS_MIN, bucketWidth, createFitter, fitFontSize, heightBoundFont, nextFit, relayRows, type FitState } from './fitFont';
 
 // A model of xterm's cell rounding: char advance = fs × ratio in CSS px, the cell is floored to whole
 // DEVICE pixels, and the screen is cols × cell. Monotonic in fs. (xterm 5.3 DomRenderer: cell.width =
@@ -345,6 +345,62 @@ describe('createFitter — the apply→measure→correct loop', () => {
     expect(fitter.state().key).toBe('');
   });
 });
+
+
+// ---- Q1wider: the mirror fills the pane (hydra-hq 4e5569) --------------------------------------
+
+describe('mirrorGeometry — Schyler Q1wider: more lines AND no empty strip', () => {
+  const CPF = 1.2;                       // cell height per font px, the measured ratio on this box
+  it('reproduces his own worked example on a half-width desktop pane', () => {
+    // He answered against "about 164x45 instead of 100x28". 161x45 is that number.
+    const g = mirrorGeometry(700, 379, CPF)!;
+    expect(g.fs).toBe(MIRROR_FS_READABLE);
+    expect(g.cols).toBe(161);
+    expect(g.rows).toBe(45);
+  });
+
+  it('fills the width that today wastes on a short strip', () => {
+    // 700x110 today: the height bound pins the font at MIRROR_FS_MIN against 100 pinned cols and
+    // leaves 452px — 67% of the pane — blank. merritt's case.
+    const g = mirrorGeometry(700, 110, CPF)!;
+    expect(700 - g.cols * CHAR_RATIO_DEFAULT * g.fs).toBeLessThan(CHAR_RATIO_DEFAULT * g.fs);
+  });
+
+  it('CAPS the columns — a floor bounds the font, nothing else bounds these', () => {
+    // A full-width desktop pane fills at 334 cols uncapped. A 334-column head is not "more of what
+    // the head is doing", and it reflows that way for every viewer, not just the pane that asked.
+    const g = mirrorGeometry(1450, 800, CPF)!;
+    expect(g.cols).toBe(MAX_MIRROR_COLS);
+    expect(g.cols).toBeLessThan(334);
+  });
+
+  it('never asks for more rows than fit — #10 holds through the new path', () => {
+    for (const [w, h] of [[700, 379], [700, 110], [1450, 800], [390, 600], [460, 90]]) {
+      const g = mirrorGeometry(w, h, CPF)!;
+      expect(g.rows * CPF * g.fs).toBeLessThanOrEqual(h);
+    }
+  });
+
+  it('the readable floor never dips below the absurd-geometry guard', () => {
+    // The two constants hold DIFFERENT jobs; this is the one-line relationship, asserted.
+    expect(MIRROR_FS_READABLE).toBeGreaterThanOrEqual(MIRROR_FS_MIN);
+  });
+
+  it('refuses to derive geometry from unmeasurable input', () => {
+    // A POST built from a mid-layout number is a resize derived from a guess.
+    expect(mirrorGeometry(0, 379, CPF)).toBeNull();
+    expect(mirrorGeometry(700, 0, CPF)).toBeNull();
+    expect(mirrorGeometry(700, 379, 0)).toBeNull();
+    expect(mirrorGeometry(700, 379, CPF, 0)).toBeNull();
+  });
+
+  it('uses the MEASURED ratio when it has one — a projection over-asks for columns', () => {
+    const projected = mirrorGeometry(700, 379, CPF)!;              // CHAR_RATIO_DEFAULT = 0.62
+    const measured = mirrorGeometry(700, 379, CPF, 0.70)!;          // a wider real advance
+    expect(measured.cols).toBeLessThan(projected.cols);
+  });
+});
+
 
 describe('height bound + relay rows — the whole TUI stays on screen, and the mirror never outgrows its pane', () => {
   const CPF = 1.2;   // renderer cell-height per font px (xterm ≈ 1.2)
