@@ -195,7 +195,7 @@ export default function HeadTerminal({
     sidRef.current = null;
     teardownXterm();
     setSess(null);
-    if (id) { try { await fetch(`${apiBase}/${encodeURIComponent(id)}/close`, { method: 'POST' }); } catch { /* */ } }
+    if (id) { try { await fetch(`${apiBase}/${encodeURIComponent(id)}/close`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* */ } }
   };
 
   const openSession = async () => {
@@ -205,7 +205,7 @@ export default function HeadTerminal({
     onError?.(null);
     try {
       const r = kind === 'shell'
-        ? await fetch(`${apiBase}/spawn`, { method: 'POST' })
+        ? await fetch(`${apiBase}/spawn`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
         : await fetch(`${apiBase}/open`, {
             // wire key stays `head` (the HQ backend contract) until the kit's v0.2 contract rename
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ head: sessionTarget }),
@@ -217,7 +217,7 @@ export default function HeadTerminal({
       // Close it ourselves now instead of adopting it. (Dedup on the backend means a same-head re-open
       // would have returned THIS very sid, so closing it is correct — the next open re-derives it.)
       if (!mountedRef.current || !activeRef.current || sidRef.current) {
-        if (d.sid) { try { await fetch(`${apiBase}/${encodeURIComponent(d.sid)}/close`, { method: 'POST' }); } catch { /* */ } }
+        if (d.sid) { try { await fetch(`${apiBase}/${encodeURIComponent(d.sid)}/close`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* */ } }
         return;
       }
       sidRef.current = d.sid;
